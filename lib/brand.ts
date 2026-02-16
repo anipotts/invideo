@@ -2,7 +2,7 @@
 export const BRAND = {
   name: 'InVideo',
   tagline: 'Learn from any YouTube video with AI.',
-  icon: 'MonitorPlay', // @phosphor-icons/react component name
+  icon: 'ChalkboardSimple', // @phosphor-icons/react component name
   domain: 'invideo-app.vercel.app',
 } as const;
 

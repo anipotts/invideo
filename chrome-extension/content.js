@@ -66,10 +66,10 @@ function injectButton() {
   btn.rel = "noopener";
   btn.className = "invideo-yt-btn";
 
-  // MonitorPlay icon
+  // ChalkboardSimple icon
   btn.innerHTML =
     '<svg viewBox="0 0 256 256" width="24" height="24" class="invideo-yt-icon">' +
-    '<path d="M208,40H48A24,24,0,0,0,24,64V176a24,24,0,0,0,24,24H208a24,24,0,0,0,24-24V64A24,24,0,0,0,208,40Zm8,136a8,8,0,0,1-8,8H48a8,8,0,0,1-8-8V64a8,8,0,0,1,8-8H208a8,8,0,0,1,8,8Zm-48,48a8,8,0,0,1-8,8H96a8,8,0,0,1,0-16h64A8,8,0,0,1,168,224Zm-64-104V120a16,16,0,0,1,24.87-13.32l32,21.34a16,16,0,0,1,0,26.64l-32,21.34A16,16,0,0,1,104,162.68V120Z" fill="currentColor"/>' +
+    '<path d="M240,192h-8V168a8,8,0,0,0-8-8H160a8,8,0,0,0-8,8v24H40V56H216v80a8,8,0,0,0,16,0V56a16,16,0,0,0-16-16H40A16,16,0,0,0,24,56V192H16a8,8,0,0,0,0,16H240a8,8,0,0,0,0-16Zm-72-16h48v16H168Z" fill="currentColor"/>' +
     "</svg>" +
     "<span>Explore in InVideo</span>";
 

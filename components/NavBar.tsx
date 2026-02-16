@@ -3,6 +3,7 @@
 import { useState, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { MagnifyingGlass } from '@phosphor-icons/react';
+import { ChalkIcon } from '@/components/ChalkIcon';
 import { AnimatePresence } from 'framer-motion';
 import SearchDropdown from './SearchDropdown';
 
@@ -54,8 +55,9 @@ export default function NavBar() {
       <a
         href="/"
         onClick={(e) => { e.preventDefault(); router.push('/'); }}
-        className="text-chalk-text font-semibold text-sm hover:opacity-80 transition-opacity shrink-0"
+        className="group flex items-center gap-1.5 text-chalk-text font-semibold text-sm hover:opacity-80 transition-opacity shrink-0"
       >
+        <ChalkIcon size={18} />
         InVideo
       </a>
 

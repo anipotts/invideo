@@ -10,7 +10,8 @@ import { useVideoTitle } from "@/hooks/useVideoTitle";
 import { useOverlayPhase } from "@/hooks/useOverlayPhase";
 import { formatTimestamp, type IntervalSelection } from "@/lib/video-utils";
 import { storageKey } from "@/lib/brand";
-import { MonitorPlay, Play, ArrowBendUpLeft, MagnifyingGlass, SpinnerGap, CheckCircle, WarningCircle } from "@phosphor-icons/react";
+import { ChalkboardSimple, Play, ArrowBendUpLeft, MagnifyingGlass, SpinnerGap, CheckCircle, WarningCircle } from "@phosphor-icons/react";
+import { ChalkIcon } from "@/components/ChalkIcon";
 import { KaraokeCaption } from "@/components/KaraokeCaption";
 import type { MediaPlayerInstance } from "@vidstack/react";
 
@@ -740,10 +741,10 @@ function WatchContent() {
           {/* Left: chalk icon + compact search */}
           <a
             href="/"
-            className="flex items-center gap-1.5 text-chalk-text hover:text-chalk-accent transition-colors shrink-0"
+            className="group flex items-center gap-1.5 text-chalk-text hover:text-chalk-accent transition-colors shrink-0"
             title="Home"
           >
-            <MonitorPlay size={18} />
+            <ChalkIcon size={18} />
             <span className="text-sm font-semibold">InVideo</span>
           </a>
           <div className="relative">
@@ -873,7 +874,7 @@ function WatchContent() {
           >
             <ArrowBendUpLeft size={18} weight="bold" />
           </a>
-          <MonitorPlay
+          <ChalkboardSimple
             size={16}
             className="flex-shrink-0 text-chalk-text"
           />
