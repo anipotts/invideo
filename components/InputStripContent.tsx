@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useRef, useEffect, type RefObject } from "react";
+import React, { useState, useRef, useEffect, useCallback, type RefObject } from "react";
 import { motion } from "framer-motion";
 import { TextInput } from "./TextInput";
 import type { UnifiedExchange } from "./ExchangeMessage";
@@ -54,11 +54,7 @@ function SettingsDropdown({
     <div ref={ref} className="relative">
       <button
         onClick={() => setOpen(!open)}
-        className={`flex items-center justify-center transition-colors flex-shrink-0 ${
-          showCaptions || speed !== 1
-            ? "text-slate-400"
-            : "text-slate-600 hover:text-slate-400"
-        }`}
+        className="flex items-center justify-center transition-colors flex-shrink-0 text-slate-600 hover:text-slate-400"
         title="Settings"
         aria-label="Settings"
       >
@@ -194,8 +190,31 @@ export function InputStripContent({
 }: InputStripContentProps) {
   const stripRef = useRef<HTMLDivElement>(null);
   const expanded = phase === "chatting";
+  const [inputFocused, setInputFocused] = useState(false);
+
+  const handleInputFocus = useCallback(() => {
+    setInputFocused(true);
+    onInputFocus?.();
+  }, [onInputFocus]);
+
+  const handleInputBlur = useCallback(() => {
+    setInputFocused(false);
+    onInputBlur?.();
+  }, [onInputBlur]);
 
   // Report height changes via ResizeObserver for dynamic spacer
+  // Tab key focuses input when input isn't focused
+  useEffect(() => {
+    const handleTab = (e: KeyboardEvent) => {
+      if (e.key === 'Tab' && !e.shiftKey && !inputFocused) {
+        e.preventDefault();
+        inputRef?.current?.focus();
+      }
+    };
+    document.addEventListener('keydown', handleTab);
+    return () => document.removeEventListener('keydown', handleTab);
+  }, [inputFocused, inputRef]);
+
   useEffect(() => {
     const el = stripRef.current;
     if (!el || !onHeightChange) return;
@@ -232,8 +251,8 @@ export function InputStripContent({
             autoFocus={false}
             exploreMode={exploreMode}
             onToggleExplore={toggleExploreMode}
-            onFocus={onInputFocus}
-            onBlur={onInputBlur}
+            onFocus={handleInputFocus}
+            onBlur={handleInputBlur}
             topBar={
               interval ? (
                 <div className="flex items-center gap-1.5 px-3 py-1.5 border-b border-white/[0.06]">
@@ -258,8 +277,19 @@ export function InputStripContent({
             }
             actions={
               <>
-                {/* Close affordance — subtle esc hint, only when conversation exists */}
-                {onClose && exchanges.length > 0 && (
+                {/* Keyboard hint: esc (when chatting + input focused) / tab (when input not focused) */}
+                {!inputFocused && (
+                  <button
+                    type="button"
+                    onClick={() => inputRef?.current?.focus()}
+                    className="hidden md:flex items-center h-8 px-2 rounded-lg text-[11px] font-medium text-slate-600 hover:text-slate-400 transition-colors"
+                    title="Focus input (Tab)"
+                    aria-label="Focus input"
+                  >
+                    tab
+                  </button>
+                )}
+                {inputFocused && expanded && onClose && (
                   <button
                     type="button"
                     onClick={onClose}
