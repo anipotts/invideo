@@ -96,23 +96,31 @@ export function extractVideoId(input: string): ExtractedVideo | null {
 }
 
 /**
- * Parse [M:SS] or [H:MM:SS] timestamp citations from AI response text.
+ * Parse [M:SS], [H:MM:SS], and range [M:SS-M:SS] timestamp citations from AI response text.
  */
-export function parseTimestampLinks(text: string): Array<{ match: string; seconds: number; index: number }> {
-  const regex = /\[(\d{1,2}):(\d{2})(?::(\d{2}))?\]/g;
-  const results: Array<{ match: string; seconds: number; index: number }> = [];
+export function parseTimestampLinks(text: string): Array<{ match: string; seconds: number; endSeconds?: number; index: number }> {
+  const regex = /\[(\d{1,2}):(\d{2})(?::(\d{2}))?(?:\s*[-\u2013]\s*(\d{1,2}):(\d{2})(?::(\d{2}))?)?\]/g;
+  const results: Array<{ match: string; seconds: number; endSeconds?: number; index: number }> = [];
   let m;
 
   while ((m = regex.exec(text)) !== null) {
     let seconds: number;
     if (m[3] !== undefined) {
-      // H:MM:SS
       seconds = parseInt(m[1]) * 3600 + parseInt(m[2]) * 60 + parseInt(m[3]);
     } else {
-      // M:SS
       seconds = parseInt(m[1]) * 60 + parseInt(m[2]);
     }
-    results.push({ match: m[0], seconds, index: m.index });
+
+    let endSeconds: number | undefined;
+    if (m[4] !== undefined) {
+      if (m[6] !== undefined) {
+        endSeconds = parseInt(m[4]) * 3600 + parseInt(m[5]) * 60 + parseInt(m[6]);
+      } else {
+        endSeconds = parseInt(m[4]) * 60 + parseInt(m[5]);
+      }
+    }
+
+    results.push({ match: m[0], seconds, endSeconds, index: m.index });
   }
 
   return results;
@@ -131,6 +139,50 @@ export function getSegmentDuration(
   if (segment.duration > 0) return segment.duration;
   if (nextSegment) return nextSegment.offset - segment.offset;
   return 3; // fallback for last segment
+}
+
+export interface WordTiming {
+  text: string;
+  startMs: number;
+  endMs: number;
+}
+
+/**
+ * Build word timings with computed end times.
+ * Uses json3 word-level data when available, falls back to
+ * character-count interpolation across the segment duration.
+ */
+export function computeWordTimings(
+  segment: TranscriptSegment,
+  duration: number,
+): WordTiming[] {
+  const segEndMs = (segment.offset + duration) * 1000;
+
+  if (segment.words && segment.words.length > 0) {
+    return segment.words.map((w, i, arr) => ({
+      text: w.text,
+      startMs: w.startMs,
+      endMs: i + 1 < arr.length ? arr[i + 1].startMs : segEndMs,
+    }));
+  }
+
+  // Fallback: character-count proportional interpolation
+  const words = segment.text.trim().split(/\s+/);
+  if (words.length === 0 || (words.length === 1 && words[0] === '')) return [];
+
+  const totalChars = words.reduce((sum, w) => sum + w.length, 0);
+  if (totalChars === 0) return [];
+
+  const segStartMs = segment.offset * 1000;
+  const segDurMs = duration * 1000;
+  let charsSoFar = 0;
+
+  return words.map((w) => {
+    const startMs = segStartMs + (charsSoFar / totalChars) * segDurMs;
+    charsSoFar += w.length;
+    const endMs = segStartMs + (charsSoFar / totalChars) * segDurMs;
+    return { text: w, startMs, endMs };
+  });
 }
 
 export function formatTimestamp(seconds: number): string {

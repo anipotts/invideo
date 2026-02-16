@@ -1,11 +1,11 @@
 'use client';
 
-import { useState, useCallback } from 'react';
-import { motion } from 'framer-motion';
+import { useState, useCallback, useMemo, isValidElement, cloneElement } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
 import { TimestampLink } from './TimestampLink';
 import { parseTimestampLinks } from '@/lib/video-utils';
 import { ClipboardText, CheckCircle, SpeakerSimpleHigh, SpeakerSimpleLow } from '@phosphor-icons/react';
-import { ToolResultRenderer, CompactToolStrip, isDrawerTool, parseStreamToSegments, type ToolCallData } from './ToolRenderers';
+import { ToolResultRenderer, parseStreamToSegments, reorderToolsAfterText, type ToolCallData } from './ToolRenderers';
 import katex from 'katex';
 import hljs from 'highlight.js/lib/core';
 import javascript from 'highlight.js/lib/languages/javascript';
@@ -55,7 +55,7 @@ interface ExchangeMessageProps {
   isReadAloudLoading?: boolean;
   onOpenVideo?: (videoId: string, title: string, channelName: string, seekTo?: number) => void;
   skipEntrance?: boolean;
-  suppressDrawerTools?: boolean;
+  readAloudProgress?: number;
 }
 
 /**
@@ -191,41 +191,76 @@ function applyInlineFormatting(text: string, keyPrefix: string): React.ReactNode
 }
 
 /**
- * Renders a text segment with both timestamp links and inline formatting.
+ * Walk an array of React nodes and replace [M:SS] text within strings and
+ * string-children elements (bold, italic, etc.) with TimestampLink components.
+ */
+function processTimestampsInNodes(
+  nodes: React.ReactNode[],
+  onSeek: (seconds: number) => void,
+  keyPrefix: string,
+  videoId: string,
+): React.ReactNode[] {
+  return nodes.flatMap((node, nodeIdx) => {
+    if (typeof node === 'string') {
+      const timestamps = parseTimestampLinks(node);
+      if (timestamps.length === 0) return [node];
+
+      const parts: React.ReactNode[] = [];
+      let lastIndex = 0;
+      for (const ts of timestamps) {
+        if (ts.index > lastIndex) {
+          parts.push(node.slice(lastIndex, ts.index));
+        }
+        const inner = ts.match.slice(1, -1);
+        const display = ts.endSeconds !== undefined
+          ? inner.replace(/\s*[-\u2013]\s*/, ' - ')
+          : inner;
+        parts.push(
+          <TimestampLink
+            key={`ts-${keyPrefix}-${nodeIdx}-${ts.index}`}
+            timestamp={display}
+            seconds={ts.seconds}
+            endSeconds={ts.endSeconds}
+            onSeek={onSeek}
+            videoId={videoId}
+          />
+        );
+        lastIndex = ts.index + ts.match.length;
+      }
+      if (lastIndex < node.length) {
+        parts.push(node.slice(lastIndex));
+      }
+      return parts;
+    }
+
+    // For React elements (bold, italic, etc.) with string children,
+    // recursively process timestamps inside them.
+    if (isValidElement(node)) {
+      const children = (node.props as Record<string, unknown>).children;
+      if (typeof children === 'string') {
+        const processed = processTimestampsInNodes(
+          [children], onSeek, `${keyPrefix}-${nodeIdx}`, videoId,
+        );
+        if (processed.length === 1 && processed[0] === children) {
+          return [node];
+        }
+        return [cloneElement(node, {}, ...processed)];
+      }
+    }
+
+    return [node];
+  });
+}
+
+/**
+ * Renders a text segment with both inline formatting and timestamp links.
+ * Formatting (bold, italic, code, latex, links) is applied FIRST, then
+ * timestamps are parsed within the resulting text nodes. This ensures
+ * **bold [M:SS]** renders correctly with bold preserved around the badge.
  */
 function renderInlineContent(text: string, onSeek: (seconds: number) => void, keyPrefix: string, videoId: string): React.ReactNode[] {
-  // Strip bold markers wrapping timestamps (e.g. **[5:32]** → [5:32])
-  text = text.replace(/\*\*(\[\d{1,2}:\d{2}(?::\d{2})?\])\*\*/g, '$1');
-  const timestamps = parseTimestampLinks(text);
-  if (timestamps.length === 0) {
-    return applyInlineFormatting(text, keyPrefix);
-  }
-
-  const parts: React.ReactNode[] = [];
-  let lastIndex = 0;
-
-  for (const ts of timestamps) {
-    if (ts.index > lastIndex) {
-      parts.push(...applyInlineFormatting(text.slice(lastIndex, ts.index), `${keyPrefix}-${ts.index}`));
-    }
-    const display = ts.match.slice(1, -1);
-    parts.push(
-      <TimestampLink
-        key={`ts-${keyPrefix}-${ts.index}`}
-        timestamp={display}
-        seconds={ts.seconds}
-        onSeek={onSeek}
-        videoId={videoId}
-      />
-    );
-    lastIndex = ts.index + ts.match.length;
-  }
-
-  if (lastIndex < text.length) {
-    parts.push(...applyInlineFormatting(text.slice(lastIndex), `${keyPrefix}-end`));
-  }
-
-  return parts;
+  const formattedNodes = applyInlineFormatting(text, keyPrefix);
+  return processTimestampsInNodes(formattedNodes, onSeek, keyPrefix, videoId);
 }
 
 /**
@@ -349,6 +384,34 @@ export function renderRichContent(content: string, onSeek?: (seconds: number) =>
   return blocks;
 }
 
+// DEMO ONLY — remove before committing
+const DEMO_GREETING = "Hmm, that is actually a really elegant way to think about it.";
+
+/** Word-by-word karaoke: spoken words are white, unspoken words are grey (like TranscriptPanel). */
+function KaraokeChatText({ text, progress }: { text: string; progress: number }) {
+  const words = useMemo(() => text.split(/(\s+)/), [text]);
+  const totalWords = useMemo(() => words.filter(w => w.trim()).length, [words]);
+  const activeWordIdx = Math.floor(progress * totalWords);
+
+  let wordCount = 0;
+  return (
+    <span>
+      {words.map((word, i) => {
+        if (!word.trim()) return <span key={i}>{word}</span>;
+        const idx = wordCount++;
+        const isSpoken = idx <= activeWordIdx;
+        return (
+          <span key={i} className={
+            isSpoken
+              ? 'text-white transition-colors duration-150'
+              : 'text-slate-500 transition-colors duration-150'
+          }>{word}</span>
+        );
+      })}
+    </span>
+  );
+}
+
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
 
@@ -409,7 +472,8 @@ export function SegmentedContent({
   onSeek,
   videoId,
   onOpenVideo,
-  suppressDrawerTools,
+  currentVideoId,
+  karaokeProgress,
 }: {
   rawAiText?: string;
   aiText: string;
@@ -418,67 +482,90 @@ export function SegmentedContent({
   onSeek: (seconds: number) => void;
   videoId: string;
   onOpenVideo?: (videoId: string, title: string, channelName: string, seekTo?: number) => void;
-  suppressDrawerTools?: boolean;
+  currentVideoId?: string;
+  karaokeProgress?: number;
 }) {
+  const isKaraokeActive = (karaokeProgress ?? 0) > 0;
+
+  /** Render a text segment, optionally with karaoke on the demoGreeting portion. */
+  function renderTextSegment(content: string, key: string) {
+    if (isKaraokeActive && content.includes(DEMO_GREETING)) {
+      const idx = content.indexOf(DEMO_GREETING);
+      const before = content.slice(0, idx);
+      const after = content.slice(idx + DEMO_GREETING.length);
+      return (
+        <span key={key}>
+          {before && renderRichContent(before, onSeek, videoId)}
+          <KaraokeChatText text={DEMO_GREETING} progress={karaokeProgress!} />
+          {after && renderRichContent(after, onSeek, videoId)}
+        </span>
+      );
+    }
+    return <span key={key}>{renderRichContent(content, onSeek, videoId)}</span>;
+  }
+
   if (rawAiText) {
-    const segments = parseStreamToSegments(rawAiText);
-    const drawerTools = segments
-      .filter((s): s is { type: 'tool'; toolCall: ToolCallData } =>
-        s.type === 'tool' && isDrawerTool(s.toolCall))
-      .map(s => s.toolCall);
+    const segments = reorderToolsAfterText(parseStreamToSegments(rawAiText));
 
     return (
       <>
         {segments.map((seg, i) => {
           if (seg.type === 'text') {
             if (!seg.content.trim()) return null;
-            return <span key={`seg-${exchangeId}-${i}`}>{renderRichContent(seg.content, onSeek, videoId)}</span>;
+            return renderTextSegment(seg.content, `seg-${exchangeId}-${i}`);
           }
           if (seg.toolCall.result.type === 'cite_moment') {
             return (
-              <ToolResultRenderer
-                key={`tool-${exchangeId}-${i}`}
-                toolCall={seg.toolCall}
-                onSeek={onSeek}
-                onOpenVideo={onOpenVideo}
-              />
+              <div key={`tool-${exchangeId}-${i}`} className="mt-1">
+                <ToolResultRenderer
+                  toolCall={seg.toolCall}
+                  onSeek={onSeek}
+                  onOpenVideo={onOpenVideo}
+                  currentVideoId={currentVideoId}
+                />
+              </div>
             );
           }
-          if (isDrawerTool(seg.toolCall)) return null;
           return (
             <div key={`tool-${exchangeId}-${i}`} className="my-2">
               <ToolResultRenderer
                 toolCall={seg.toolCall}
                 onSeek={onSeek}
                 onOpenVideo={onOpenVideo}
+                currentVideoId={currentVideoId}
               />
             </div>
           );
         })}
-        {!suppressDrawerTools && drawerTools.length > 0 && (
-          <CompactToolStrip toolCalls={drawerTools} onSeek={onSeek} onOpenVideo={onOpenVideo} />
-        )}
       </>
     );
   }
 
   // Fallback: text then tool calls (backward compat for exchanges without rawAiText)
   const allTools = toolCalls || [];
-  const drawerTools = allTools.filter(tc => isDrawerTool(tc));
-  const otherTools = allTools.filter(tc => !isDrawerTool(tc) && tc.result.type !== 'cite_moment');
   const citeTools = allTools.filter(tc => tc.result.type === 'cite_moment');
+  const otherTools = allTools.filter(tc => tc.result.type !== 'cite_moment');
 
   return (
     <>
-      {renderRichContent(aiText, onSeek, videoId)}
-      {citeTools.map((tc, i) => (
-        <ToolResultRenderer
-          key={`cite-${exchangeId}-${i}`}
-          toolCall={tc}
-          onSeek={onSeek}
-          onOpenVideo={onOpenVideo}
-        />
-      ))}
+      {isKaraokeActive && aiText.includes(DEMO_GREETING) ? (
+        renderTextSegment(aiText, `fallback-${exchangeId}`)
+      ) : (
+        renderRichContent(aiText, onSeek, videoId)
+      )}
+      {citeTools.length > 0 && (
+        <div className="mt-1 flex flex-wrap gap-1">
+          {citeTools.map((tc, i) => (
+            <ToolResultRenderer
+              key={`cite-${exchangeId}-${i}`}
+              toolCall={tc}
+              onSeek={onSeek}
+              onOpenVideo={onOpenVideo}
+              currentVideoId={currentVideoId}
+            />
+          ))}
+        </div>
+      )}
       {otherTools.length > 0 && (
         <div className="mt-2 space-y-1">
           {otherTools.map((tc, i) => (
@@ -487,18 +574,17 @@ export function SegmentedContent({
               toolCall={tc}
               onSeek={onSeek}
               onOpenVideo={onOpenVideo}
+              currentVideoId={currentVideoId}
             />
           ))}
         </div>
-      )}
-      {!suppressDrawerTools && drawerTools.length > 0 && (
-        <CompactToolStrip toolCalls={drawerTools} onSeek={onSeek} onOpenVideo={onOpenVideo} />
       )}
     </>
   );
 }
 
-export function ExchangeMessage({ exchange, onSeek, videoId, onPlayMessage, isPlaying, isReadAloudLoading, onOpenVideo, skipEntrance, suppressDrawerTools }: ExchangeMessageProps) {
+export function ExchangeMessage({ exchange, onSeek, videoId, onPlayMessage, isPlaying, isReadAloudLoading, onOpenVideo, skipEntrance, readAloudProgress = 0 }: ExchangeMessageProps) {
+  const karaokeProgress = isPlaying && readAloudProgress > 0 ? readAloudProgress : 0;
 
   return (
     <div className="space-y-3">
@@ -509,8 +595,8 @@ export function ExchangeMessage({ exchange, onSeek, videoId, onPlayMessage, isPl
         transition={{ duration: 0.2 }}
         className="flex justify-end w-full"
       >
-        <div className="max-w-[85%] px-3.5 py-2 rounded-lg bg-white/[0.10] border border-white/[0.12] text-white text-sm leading-relaxed break-words">
-          {exchange.userText}
+        <div className="max-w-[85%] px-3.5 py-2 rounded-lg bg-white/[0.10] backdrop-blur-sm border border-white/[0.12] text-white text-sm leading-relaxed break-words">
+          {renderInlineContent(exchange.userText, onSeek, `user-${exchange.id}`, videoId)}
         </div>
       </motion.div>
 
@@ -531,7 +617,7 @@ export function ExchangeMessage({ exchange, onSeek, videoId, onPlayMessage, isPl
             </div>
           )}
 
-          {/* Message content with interleaved tool cards */}
+          {/* Message content — always SegmentedContent, karaoke applied inline */}
           <div className="text-[15px] text-slate-300 leading-relaxed whitespace-pre-wrap break-words">
             <SegmentedContent
               rawAiText={exchange.rawAiText}
@@ -541,12 +627,13 @@ export function ExchangeMessage({ exchange, onSeek, videoId, onPlayMessage, isPl
               onSeek={onSeek}
               videoId={videoId}
               onOpenVideo={onOpenVideo}
-              suppressDrawerTools={suppressDrawerTools}
+              currentVideoId={videoId}
+              karaokeProgress={karaokeProgress}
             />
           </div>
 
-          {/* Action buttons */}
-          <div className="mt-1 flex items-center gap-0.5">
+          {/* Action buttons — equal spacing between all items */}
+          <div className="mt-1 flex items-center gap-1.5">
             <CopyButton text={exchange.aiText} />
             {onPlayMessage && (
               <SpeakerButton
@@ -556,6 +643,39 @@ export function ExchangeMessage({ exchange, onSeek, videoId, onPlayMessage, isPl
                 isLoading={!!isReadAloudLoading}
               />
             )}
+            {/* Channel avatar during TTS playback with audio-reactive ring */}
+            <AnimatePresence>
+              {isPlaying && (
+                <motion.div
+                  initial={{ scale: 0, opacity: 0 }}
+                  animate={{ scale: 1, opacity: 1 }}
+                  exit={{ scale: 0, opacity: 0 }}
+                  transition={{ duration: 0.25, ease: [0.23, 1, 0.32, 1] }}
+                  className="relative flex-shrink-0"
+                >
+                  {/* Audio-reactive ring — subtle pulse synced to progress */}
+                  <motion.div
+                    className="absolute inset-[-3px] rounded-full border-2 border-chalk-accent/60"
+                    animate={{
+                      scale: [1, 1.15, 1],
+                      opacity: [0.5, 0.8, 0.5],
+                    }}
+                    transition={{
+                      duration: 1.2,
+                      repeat: Infinity,
+                      ease: 'easeInOut',
+                    }}
+                  />
+                  <div className="w-[22px] h-[22px] rounded-full overflow-hidden border border-chalk-accent/40">
+                    <img
+                      src="/demo/3b1b-avatar.jpg"
+                      alt=""
+                      className="w-full h-full object-cover"
+                    />
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
           </div>
         </div>
       </motion.div>

@@ -67,6 +67,7 @@ export function InteractionOverlay({
   playbackSpeed,
   onSetSpeed,
   hasTranscript,
+  drawerRef,
 }: InteractionOverlayProps) {
   const [input, setInput] = useState("");
   const [inputStripHeight, setInputStripHeight] = useState(72);
@@ -80,6 +81,7 @@ export function InteractionOverlay({
 
   const visible = phase === 'chatting';
   const isTextMode = voiceControls.state === "idle";
+  const hasMessages = exchanges.length > 0 || isTextStreaming || !!currentAiText;
 
   // One-time cleanup of old localStorage keys
   useEffect(() => {
@@ -142,7 +144,7 @@ export function InteractionOverlay({
             transition={{ duration: 0.2 }}
             className="absolute inset-0 md:inset-auto md:top-0 md:left-0 md:right-0 md:aspect-video z-10 flex flex-col md:rounded-xl md:overflow-hidden"
           >
-            <OverlayBackdrop visible={visible} onClick={onClose} />
+            <OverlayBackdrop visible={visible} onClick={onClose} grainActive={hasMessages} />
             <VideoTimeProvider currentTime={currentTime} isPaused={false}>
               <MessagePanel
                 hasContent={hasContent}
@@ -172,6 +174,7 @@ export function InteractionOverlay({
                 playingMessageId={readAloud.playingMessageId}
                 onPlayMessage={readAloud.onPlay}
                 isReadAloudLoading={readAloud.isLoading}
+                readAloudProgress={readAloud.readAloudProgress}
                 handlePillSelect={handlePillSelect}
                 focusInput={focusInput}
                 learnState={learnState}
@@ -182,6 +185,7 @@ export function InteractionOverlay({
                 inVideoEntry={inVideo.entry}
                 onCloseInVideo={inVideo.onClose}
                 isPaused={isPaused}
+                drawerRef={drawerRef}
               />
             </VideoTimeProvider>
             {/* Dynamic spacer for input strip on mobile */}

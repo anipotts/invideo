@@ -8,9 +8,17 @@
  *   Phase 2 — STT cascade (sequential): WhisperX → Groq Whisper → Deepgram
  */
 
+import { execFile } from 'child_process';
+import { promisify } from 'util';
+import { tmpdir } from 'os';
+import { join } from 'path';
+import { readFile, unlink } from 'fs/promises';
+
 import { withTimeout } from './retry';
 import { isGroqAvailable, transcribeWithGroq } from './stt/groq-whisper';
 import { isDeepgramAvailable, transcribeWithDeepgram } from './stt/deepgram';
+
+const execFileAsync = promisify(execFile);
 
 // Re-export client-safe types and functions so API routes can use them
 export type { TranscriptSegment, TranscriptSource, TranscriptResult } from './video-utils';
@@ -62,6 +70,8 @@ interface InnertubePlayerResponse {
     adaptiveFormats?: Array<{
       itag: number;
       url?: string;
+      signatureCipher?: string;
+      cipher?: string;
       mimeType: string;
       contentLength?: string;
       approxDurationMs?: string;
@@ -174,6 +184,87 @@ async function fetchInnertubePlayer(videoId: string): Promise<InnertubePlayerRes
       signal: controller.signal,
     });
     if (!resp.ok) throw new Error(`Innertube request failed: ${resp.status}`);
+    return (await resp.json()) as InnertubePlayerResponse;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/**
+ * Fetch player data using iOS client (fallback when ANDROID is blocked).
+ * iOS client often provides direct URLs without signatureCipher.
+ */
+async function fetchInnertubePlayerIOS(videoId: string): Promise<InnertubePlayerResponse> {
+  const key = process.env.YOUTUBE_INNERTUBE_KEY || 'AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w';
+  const iosVersion = '19.29.1';
+  const iosUA = `com.google.ios.youtube/${iosVersion} (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X;)`;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
+  try {
+    const resp = await fetch(`https://www.youtube.com/youtubei/v1/player?key=${key}&prettyPrint=false`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'User-Agent': iosUA,
+        'X-YouTube-Client-Name': '5',
+        'X-YouTube-Client-Version': iosVersion,
+      },
+      body: JSON.stringify({
+        videoId,
+        context: {
+          client: {
+            clientName: 'IOS',
+            clientVersion: iosVersion,
+            deviceMake: 'Apple',
+            deviceModel: 'iPhone16,2',
+            userAgent: iosUA,
+            hl: 'en',
+            gl: 'US',
+          },
+        },
+      }),
+      signal: controller.signal,
+    });
+    if (!resp.ok) throw new Error(`IOS Innertube request failed: ${resp.status}`);
+    return (await resp.json()) as InnertubePlayerResponse;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/**
+ * Fetch player data using TV embedded client (fallback for embedded contexts).
+ * Often provides direct URLs without signatureCipher for non-age-restricted videos.
+ */
+async function fetchInnertubePlayerTVEmbed(videoId: string): Promise<InnertubePlayerResponse> {
+  const key = process.env.YOUTUBE_INNERTUBE_KEY || 'AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w';
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
+  try {
+    const resp = await fetch(`https://www.youtube.com/youtubei/v1/player?key=${key}&prettyPrint=false`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-YouTube-Client-Name': '85',
+        'X-YouTube-Client-Version': '2.0',
+      },
+      body: JSON.stringify({
+        videoId,
+        context: {
+          client: {
+            clientName: 'TVHTML5_SIMPLY_EMBEDDED_PLAYER',
+            clientVersion: '2.0',
+          },
+          thirdParty: {
+            embedUrl: 'https://www.youtube.com',
+          },
+        },
+      }),
+      signal: controller.signal,
+    });
+    if (!resp.ok) throw new Error(`TV embed Innertube request failed: ${resp.status}`);
     return (await resp.json()) as InnertubePlayerResponse;
   } finally {
     clearTimeout(timeout);
@@ -299,15 +390,34 @@ async function fetchTranscriptWebScrape(videoId: string): Promise<{ segments: Tr
  * Download audio from pre-fetched adaptive formats.
  * Selects smallest audio stream, validates SSRF, downloads with size guard.
  */
+const ANDROID_UA = `com.google.android.youtube/${process.env.YOUTUBE_CLIENT_VERSION || '19.44.38'} (Linux; U; Android 14)`;
+const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+
 async function downloadAudioFromFormats(
   formats: NonNullable<InnertubePlayerResponse['streamingData']>['adaptiveFormats'],
   videoId: string,
+  userAgent?: string,
 ): Promise<Buffer> {
   if (!formats || formats.length === 0) throw new Error('No streaming formats available');
 
   // Find an audio-only stream (prefer mp4a/opus, smallest file)
-  const audioFormats = formats
-    .filter((f) => f.mimeType.startsWith('audio/') && f.url)
+  // First try formats with direct URLs, then try extracting URLs from signatureCipher
+  const withDirectUrl = formats.filter((f) => f.mimeType.startsWith('audio/') && f.url);
+  const withCipher = formats.filter((f) => f.mimeType.startsWith('audio/') && !f.url && f.signatureCipher);
+
+  // Try to extract base URL from signatureCipher (works for some formats without full cipher decoding)
+  for (const f of withCipher) {
+    try {
+      const params = new URLSearchParams(f.signatureCipher!);
+      const url = params.get('url');
+      if (url) {
+        f.url = url;
+        withDirectUrl.push(f);
+      }
+    } catch { /* skip malformed ciphers */ }
+  }
+
+  const audioFormats = withDirectUrl
     .sort((a, b) => parseInt(a.contentLength || '999999999') - parseInt(b.contentLength || '999999999'));
 
   if (audioFormats.length === 0) throw new Error('No audio streams with direct URLs');
@@ -329,10 +439,16 @@ async function downloadAudioFromFormats(
   console.log(`[transcript] downloading audio via HTTP (itag ${chosen.itag}, ~${Math.round(declaredSize / 1024)}KB)`);
 
   // Download the audio stream with size enforcement
+  // Must send Android UA matching the Innertube client context, or YouTube CDN returns 403
   const audioController = new AbortController();
   const audioTimeout = setTimeout(() => audioController.abort(), 120000);
   try {
-    const audioResp = await fetch(audioUrl, { signal: audioController.signal });
+    const audioResp = await fetch(audioUrl, {
+      signal: audioController.signal,
+      headers: {
+        'User-Agent': userAgent || ANDROID_UA,
+      },
+    });
     if (!audioResp.ok) throw new Error(`Audio download failed: ${audioResp.status}`);
 
     // Check Content-Length header
@@ -363,19 +479,224 @@ async function downloadAudioFromFormats(
 }
 
 /**
+ * Download audio using yt-dlp (most reliable — handles all YouTube obfuscation).
+ * Falls through gracefully if yt-dlp is not installed.
+ */
+async function downloadAudioYtDlp(videoId: string): Promise<Buffer> {
+  const tmpFile = join(tmpdir(), `chalk-audio-${videoId}-${Date.now()}.webm`);
+  try {
+    await execFileAsync('yt-dlp', [
+      '-f', 'ba[ext=webm][filesize<25M]/ba[filesize<25M]/ba',
+      '-o', tmpFile,
+      '--no-playlist',
+      '--no-warnings',
+      '--no-check-certificates',
+      `https://www.youtube.com/watch?v=${videoId}`,
+    ], { timeout: 60000 });
+    const buf = await readFile(tmpFile);
+    if (buf.length === 0) throw new Error('yt-dlp produced empty file');
+    if (buf.length > MAX_AUDIO_BYTES) throw new Error(`yt-dlp audio too large (${Math.round(buf.length / 1024 / 1024)}MB)`);
+    console.log(`[transcript] yt-dlp audio: ${Math.round(buf.length / 1024)}KB`);
+    return buf;
+  } finally {
+    try { await unlink(tmpFile); } catch { /* ok if missing */ }
+  }
+}
+
+/**
+ * Fetch player data using WEB client with visitor data (extracted from HTML page).
+ * This is what YouTube's own player uses — most likely to return formats with URLs.
+ */
+async function fetchInnertubePlayerWEB(videoId: string, visitorData?: string): Promise<InnertubePlayerResponse> {
+  const key = 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8';
+  const clientVersion = '2.20250210.01.00';
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
+  try {
+    const resp = await fetch(`https://www.youtube.com/youtubei/v1/player?key=${key}&prettyPrint=false`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'User-Agent': BROWSER_UA,
+        'X-YouTube-Client-Name': '1',
+        'X-YouTube-Client-Version': clientVersion,
+        'Origin': 'https://www.youtube.com',
+        'Referer': `https://www.youtube.com/watch?v=${videoId}`,
+      },
+      body: JSON.stringify({
+        videoId,
+        context: {
+          client: {
+            clientName: 'WEB',
+            clientVersion,
+            ...(visitorData ? { visitorData } : {}),
+            hl: 'en',
+            gl: 'US',
+          },
+        },
+        playbackContext: {
+          contentPlaybackContext: {
+            signatureTimestamp: 20073,
+          },
+        },
+      }),
+      signal: controller.signal,
+    });
+    if (!resp.ok) throw new Error(`WEB Innertube request failed: ${resp.status}`);
+    return (await resp.json()) as InnertubePlayerResponse;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/**
  * Download audio from YouTube via Innertube streaming URLs (HTTP-only).
- * Fetches the player response to get adaptive audio stream URLs, then downloads directly.
+ * Cascade: yt-dlp → WEB → ANDROID → IOS → TV embedded.
  */
 export async function downloadAudioHTTP(videoId: string): Promise<Buffer> {
-  const data = await fetchInnertubePlayer(videoId);
-  return downloadAudioFromFormats(data.streamingData?.adaptiveFormats, videoId);
+  // Try yt-dlp first — most reliable method, handles all YouTube obfuscation
+  try {
+    return await downloadAudioYtDlp(videoId);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    // ENOENT = yt-dlp not installed (expected on Vercel), anything else is a real error
+    if (msg.includes('ENOENT')) {
+      console.log('[transcript] yt-dlp not installed, falling back to Innertube clients');
+    } else {
+      console.log(`[transcript] yt-dlp failed: ${msg}`);
+    }
+  }
+
+  const clients: Array<{ name: string; fetch: () => Promise<InnertubePlayerResponse>; ua?: string }> = [
+    { name: 'WEB', fetch: () => fetchInnertubePlayerWEB(videoId), ua: BROWSER_UA },
+    { name: 'ANDROID', fetch: () => fetchInnertubePlayer(videoId) },
+    { name: 'IOS', fetch: () => fetchInnertubePlayerIOS(videoId) },
+    { name: 'TV_EMBED', fetch: () => fetchInnertubePlayerTVEmbed(videoId) },
+  ];
+
+  const errors: string[] = [];
+  for (const client of clients) {
+    try {
+      const data = await client.fetch();
+      const formats = data.streamingData?.adaptiveFormats;
+      const audioCount = formats?.filter(f => f.mimeType.startsWith('audio/')).length ?? 0;
+      const urlCount = formats?.filter(f => f.mimeType.startsWith('audio/') && (f.url || f.signatureCipher || f.cipher)).length ?? 0;
+      console.log(`[transcript] ${client.name}: ${formats?.length ?? 0} formats, ${audioCount} audio, ${urlCount} with url/cipher`);
+      return await downloadAudioFromFormats(formats, videoId, client.ua);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      errors.push(`${client.name}: ${msg}`);
+      console.log(`[transcript] ${client.name} audio failed: ${msg}`);
+    }
+  }
+  throw new Error(`All Innertube clients failed: ${errors.join('; ')}`);
+}
+
+// ─── YouTube cipher decoder ──────────────────────────────────────────────────
+
+/**
+ * Decode a signatureCipher to get a working direct URL.
+ * YouTube encrypts streaming URLs with a cipher function embedded in their player JS (base.js).
+ * This extracts the function and applies it to recover the direct URL.
+ */
+async function decodeCipherUrl(signatureCipher: string, playerJsUrl: string): Promise<string> {
+  const params = new URLSearchParams(signatureCipher);
+  const encSig = params.get('s');
+  const sp = params.get('sp') || 'signature';
+  const baseUrl = params.get('url');
+  if (!encSig || !baseUrl) throw new Error('Missing s or url in signatureCipher');
+
+  // Fetch player JS
+  const jsResp = await fetch(playerJsUrl, {
+    headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+  });
+  if (!jsResp.ok) throw new Error(`Failed to fetch player JS: ${jsResp.status}`);
+  const js = await jsResp.text();
+
+  // Find the cipher entry function name using known patterns
+  const funcPatterns = [
+    /\b[cs]\s*&&\s*[adf]\.set\([^,]+\s*,\s*encodeURIComponent\(([a-zA-Z0-9$]+)\(/,
+    /\bm=([a-zA-Z0-9$]{2,})\(decodeURIComponent\(h\.s\)\)/,
+    /\bc\s*&&\s*d\.set\([^,]+\s*,\s*(?:encodeURIComponent\s*\()([a-zA-Z0-9$]+)\(/,
+    /\bc\s*&&\s*[a-z]\.set\([^,]+\s*,\s*([a-zA-Z0-9$]+)\(/,
+    /\bc\s*&&\s*[a-z]\.set\([^,]+\s*,\s*encodeURIComponent\(([a-zA-Z0-9$]+)\(/,
+    /([a-zA-Z0-9$]+)\s*=\s*function\(\s*a\s*\)\s*\{\s*a\s*=\s*a\.split\(\s*""\s*\)/,
+  ];
+
+  let funcName: string | null = null;
+  for (const pat of funcPatterns) {
+    const m = js.match(pat);
+    if (m) { funcName = m[1]; break; }
+  }
+  if (!funcName) throw new Error('Could not find cipher function name in player JS');
+
+  // Find the function body: funcName=function(a){a=a.split("");XX.method(a,N);...;return a.join("")}
+  const esc = funcName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const bodyMatch = js.match(new RegExp(
+    `(?:${esc}=function|function ${esc})\\(a\\)\\{a=a\\.split\\(""\\);([^}]+)return a\\.join\\(""\\)\\}`
+  ));
+  if (!bodyMatch) throw new Error('Could not find cipher function body');
+  const operations = bodyMatch[1];
+
+  // Find helper object name (e.g., "Xo" in "Xo.method(a,5)")
+  const helperMatch = operations.match(/([a-zA-Z0-9$]{2,})\.([a-zA-Z0-9$]+)\(/);
+  if (!helperMatch) throw new Error('Could not find cipher helper object');
+  const helperName = helperMatch[1];
+
+  // Find helper object definition to classify its methods
+  const escHelper = helperName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const helperDef = js.match(new RegExp(`var\\s+${escHelper}\\s*=\\s*\\{([\\s\\S]*?)\\};`));
+  if (!helperDef) throw new Error('Could not find cipher helper definition');
+
+  // Classify each method: reverse, splice, or swap
+  const methodType: Record<string, 'reverse' | 'splice' | 'swap'> = {};
+  const methodRegex = /([a-zA-Z0-9$]+)\s*:\s*function\s*\([^)]*\)\s*\{([^}]+)\}/g;
+  let mm;
+  while ((mm = methodRegex.exec(helperDef[1])) !== null) {
+    const body = mm[2];
+    if (body.includes('reverse')) methodType[mm[1]] = 'reverse';
+    else if (body.includes('splice')) methodType[mm[1]] = 'splice';
+    else methodType[mm[1]] = 'swap';
+  }
+
+  // Apply cipher operations to the encrypted signature
+  let sig = encSig.split('');
+  const opRegex = new RegExp(`${escHelper}\\.([a-zA-Z0-9$]+)\\(a,(\\d+)\\)`, 'g');
+  let op;
+  while ((op = opRegex.exec(operations)) !== null) {
+    const [, method, indexStr] = op;
+    const idx = parseInt(indexStr);
+    const type = methodType[method];
+    if (type === 'reverse') {
+      sig.reverse();
+    } else if (type === 'splice') {
+      sig.splice(0, idx);
+    } else if (type === 'swap') {
+      const temp = sig[0];
+      sig[0] = sig[idx % sig.length];
+      sig[idx % sig.length] = temp;
+    }
+  }
+
+  return `${baseUrl}&${sp}=${encodeURIComponent(sig.join(''))}`;
 }
 
 /**
  * Download audio by scraping the YouTube watch page HTML.
- * More reliable from datacenter IPs than the Innertube POST because it looks like a browser visit.
+ * Tries yt-dlp first, then WEB Innertube with visitor data, then HTML extraction + cipher decoding.
  */
 export async function downloadAudioWebScrape(videoId: string): Promise<Buffer> {
+  // Try yt-dlp first — handles all YouTube obfuscation
+  try {
+    return await downloadAudioYtDlp(videoId);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!msg.includes('ENOENT')) {
+      console.log(`[transcript] yt-dlp failed in web scrape path: ${msg}`);
+    }
+  }
+
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 15000);
 
@@ -383,7 +704,7 @@ export async function downloadAudioWebScrape(videoId: string): Promise<Buffer> {
   try {
     resp = await fetch(`https://www.youtube.com/watch?v=${videoId}`, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        'User-Agent': BROWSER_UA,
         'Accept-Language': 'en-US,en;q=0.9',
         Accept: 'text/html,application/xhtml+xml',
       },
@@ -396,6 +717,45 @@ export async function downloadAudioWebScrape(videoId: string): Promise<Buffer> {
   if (!resp.ok) throw new Error(`YouTube page fetch failed: ${resp.status}`);
   const html = await resp.text();
 
+  // Extract visitor data for WEB Innertube call
+  const visitorDataMatch = html.match(/"visitorData"\s*:\s*"([^"]+)"/);
+  const visitorData = visitorDataMatch?.[1];
+
+  // Try WEB Innertube client with visitor data from the page (most likely to have URLs)
+  if (visitorData) {
+    try {
+      const webData = await fetchInnertubePlayerWEB(videoId, visitorData);
+      const webFormats = webData.streamingData?.adaptiveFormats;
+      const audioWithUrl = webFormats?.filter(f => f.mimeType.startsWith('audio/') && (f.url || f.signatureCipher || f.cipher));
+      if (audioWithUrl && audioWithUrl.length > 0) {
+        console.log(`[transcript] WEB Innertube (with visitorData): ${audioWithUrl.length} audio formats with URLs`);
+        // Normalize cipher fields
+        for (const f of webFormats!) {
+          if (!f.signatureCipher && f.cipher) f.signatureCipher = f.cipher;
+        }
+        // If formats have signatureCipher but no direct URL, try cipher decoding
+        const needsCipher = audioWithUrl.filter(f => !f.url && f.signatureCipher);
+        if (needsCipher.length > 0 && audioWithUrl.filter(f => f.url).length === 0) {
+          const jsUrlMatch = html.match(/"jsUrl"\s*:\s*"([^"]+)"/);
+          if (jsUrlMatch) {
+            const playerJsUrl = jsUrlMatch[1].startsWith('/') ? `https://www.youtube.com${jsUrlMatch[1]}` : jsUrlMatch[1];
+            for (const f of needsCipher) {
+              try {
+                f.url = await decodeCipherUrl(f.signatureCipher!, playerJsUrl);
+                break;
+              } catch { /* try next */ }
+            }
+          }
+        }
+        return await downloadAudioFromFormats(webFormats, videoId, BROWSER_UA);
+      }
+      console.log(`[transcript] WEB Innertube: formats present but no audio URLs`);
+    } catch (err) {
+      console.log(`[transcript] WEB Innertube with visitorData failed: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  // Fall back to extracting from HTML ytInitialPlayerResponse
   const playerMatch = html.match(/var\s+ytInitialPlayerResponse\s*=\s*(\{[\s\S]+?\});\s*(?:var|<\/script>)/);
   if (!playerMatch) throw new Error('Could not find ytInitialPlayerResponse in page HTML');
 
@@ -407,8 +767,59 @@ export async function downloadAudioWebScrape(videoId: string): Promise<Buffer> {
   }
 
   const formats = playerData.streamingData?.adaptiveFormats;
-  console.log(`[transcript] web scrape audio: got ${formats?.length ?? 0} formats`);
-  return downloadAudioFromFormats(formats, videoId);
+
+  // Normalize: some YouTube responses use "cipher" instead of "signatureCipher"
+  if (formats) {
+    for (const f of formats) {
+      if (!f.signatureCipher && f.cipher) f.signatureCipher = f.cipher;
+    }
+  }
+
+  // Diagnostic: log format breakdown
+  const audioFormats = formats?.filter((f) => f.mimeType.startsWith('audio/')) ?? [];
+  const audioWithUrl = audioFormats.filter((f) => f.url);
+  const audioWithCipher = audioFormats.filter((f) => f.signatureCipher);
+  console.log(`[transcript] HTML scrape: ${formats?.length ?? 0} total formats, ${audioFormats.length} audio, ${audioWithUrl.length} with url, ${audioWithCipher.length} with cipher`);
+
+  // Log sample format keys to diagnose what YouTube provides
+  if (audioFormats.length > 0 && audioWithUrl.length === 0 && audioWithCipher.length === 0) {
+    const sample = audioFormats[0] as Record<string, unknown>;
+    const keys = Object.keys(sample);
+    console.log(`[transcript] sample audio format keys: [${keys.join(', ')}]`);
+    console.log(`[transcript] sample: itag=${sample.itag} mimeType=${sample.mimeType}`);
+  }
+
+  // Try direct URLs first
+  if (audioWithUrl.length > 0) {
+    return downloadAudioFromFormats(formats, videoId, BROWSER_UA);
+  }
+
+  // No direct URLs — decode signatureCipher using player JS
+  if (audioWithCipher.length === 0) {
+    throw new Error(`No audio URLs in HTML (${audioFormats.length} audio formats, none with url or cipher)`);
+  }
+
+  // Extract base.js URL from page HTML
+  const jsUrlMatch = html.match(/"jsUrl"\s*:\s*"([^"]+)"/);
+  if (!jsUrlMatch) throw new Error('Could not find base.js URL in page HTML');
+  const playerJsUrl = jsUrlMatch[1].startsWith('/')
+    ? `https://www.youtube.com${jsUrlMatch[1]}`
+    : jsUrlMatch[1];
+
+  console.log(`[transcript] decoding ${audioWithCipher.length} cipher audio formats via ${playerJsUrl}`);
+
+  audioWithCipher.sort((a, b) => parseInt(a.contentLength || '999999999') - parseInt(b.contentLength || '999999999'));
+
+  for (const f of audioWithCipher) {
+    try {
+      f.url = await decodeCipherUrl(f.signatureCipher!, playerJsUrl);
+      break; // Only need one working URL
+    } catch (err) {
+      console.log(`[transcript] cipher decode failed for itag ${f.itag}:`, err instanceof Error ? err.message : err);
+    }
+  }
+
+  return downloadAudioFromFormats(formats, videoId, BROWSER_UA);
 }
 
 // ─── WhisperX service client ────────────────────────────────────────────────────

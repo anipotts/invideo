@@ -1,14 +1,11 @@
 'use client';
 
 import { useState, useRef, useCallback, useEffect } from 'react';
-import dynamic from 'next/dynamic';
 import { TranscriptPanel } from './TranscriptPanel';
 import { useTranscriptStream } from '@/hooks/useTranscriptStream';
 import { useVideoTitle } from '@/hooks/useVideoTitle';
 import { X, ArrowLeft, ArrowSquareOut } from '@phosphor-icons/react';
-import type { MediaPlayerInstance } from '@vidstack/react';
-
-const VideoPlayer = dynamic(() => import('./VideoPlayer').then((m) => m.VideoPlayer), { ssr: false });
+import { ensureYTApi } from '@/lib/youtube-iframe-api';
 
 export interface SideVideoEntry {
   videoId: string;
@@ -114,11 +111,14 @@ function SidePanelContent({ entry, onOpenVideo }: {
   entry: SideVideoEntry;
   onOpenVideo?: (videoId: string, title: string, channelName: string, seekTo?: number) => void;
 }) {
-  const playerRef = useRef<MediaPlayerInstance>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const ytPlayerRef = useRef<any>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
   const [currentTime, setCurrentTime] = useState(0);
   const [showTranscript, setShowTranscript] = useState(true);
 
-  // Fetch transcript for side video
   const {
     segments,
     status,
@@ -128,47 +128,63 @@ function SidePanelContent({ entry, onOpenVideo }: {
     error,
   } = useTranscriptStream(entry.videoId);
 
-  // Fetch title (falls back to the entry title)
   const { title: fetchedTitle } = useVideoTitle(entry.videoId);
   const displayTitle = fetchedTitle || entry.title;
 
-  const handleTimeUpdate = useCallback((time: number) => {
-    setCurrentTime(time);
-  }, []);
+  // Create YouTube player via IFrame API (uses youtube-nocookie.com)
+  useEffect(() => {
+    let destroyed = false;
+
+    ensureYTApi().then(() => {
+      if (destroyed || !containerRef.current) return;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const YT = (window as any).YT;
+
+      ytPlayerRef.current = new YT.Player(containerRef.current, {
+        videoId: entry.videoId,
+        host: 'https://www.youtube-nocookie.com',
+        playerVars: {
+          autoplay: 0,
+          start: entry.seekTo ? Math.floor(entry.seekTo) : undefined,
+          rel: 0,
+          modestbranding: 1,
+          origin: window.location.origin,
+        },
+        events: {
+          onReady: () => {
+            pollRef.current = setInterval(() => {
+              try {
+                const t = ytPlayerRef.current?.getCurrentTime?.();
+                if (typeof t === 'number') setCurrentTime(t);
+              } catch { /* player may be destroyed */ }
+            }, 250);
+          },
+        },
+      });
+    });
+
+    return () => {
+      destroyed = true;
+      if (pollRef.current) clearInterval(pollRef.current);
+      try { ytPlayerRef.current?.destroy?.(); } catch { /* ignore */ }
+      ytPlayerRef.current = null;
+    };
+  }, [entry.videoId, entry.seekTo]);
 
   const handleSeek = useCallback((seconds: number) => {
-    const player = playerRef.current;
-    if (player) {
-      player.currentTime = seconds;
-    }
+    try { ytPlayerRef.current?.seekTo?.(seconds, true); } catch { /* ignore */ }
   }, []);
 
   const handleAskAbout = useCallback((_timestamp: number, _text: string) => {
     // Could integrate with the main chat in the future
   }, []);
 
-  // Seek to entry timestamp on mount
-  useEffect(() => {
-    if (entry.seekTo && playerRef.current) {
-      const timer = setTimeout(() => {
-        if (playerRef.current) {
-          playerRef.current.currentTime = entry.seekTo!;
-        }
-      }, 1000);
-      return () => clearTimeout(timer);
-    }
-  }, [entry.seekTo, entry.videoId]);
-
   return (
     <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
-      {/* Video player — full width in the 45% column */}
+      {/* YouTube embed (nocookie domain, IFrame API for time sync) */}
       <div className="flex-none">
-        <div className="relative overflow-hidden">
-          <VideoPlayer
-            playerRef={playerRef}
-            videoId={entry.videoId}
-            onTimeUpdate={handleTimeUpdate}
-          />
+        <div className="relative aspect-video bg-black overflow-hidden">
+          <div ref={containerRef} className="absolute inset-0 w-full h-full" />
         </div>
         <div className="px-4 py-2">
           <div className="text-sm font-medium text-slate-200 line-clamp-2">{displayTitle}</div>
@@ -187,6 +203,14 @@ function SidePanelContent({ entry, onOpenVideo }: {
         >
           Transcript
         </button>
+        {entry.seekTo != null && (
+          <button
+            onClick={() => handleSeek(entry.seekTo!)}
+            className="ml-2 text-[11px] font-medium px-2.5 py-1 rounded-md text-slate-500 hover:text-slate-300 bg-white/[0.04] transition-colors"
+          >
+            Jump to {Math.floor(entry.seekTo / 60)}:{String(Math.floor(entry.seekTo % 60)).padStart(2, '0')}
+          </button>
+        )}
       </div>
 
       {/* Transcript */}

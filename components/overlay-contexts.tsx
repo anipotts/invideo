@@ -103,6 +103,7 @@ export interface ReadAloudContextValue {
   playingMessageId: string | null;
   onPlay: (id: string, text: string) => void;
   isLoading: boolean;
+  readAloudProgress: number;
 }
 
 const ReadAloudCtx = createContext<ReadAloudContextValue | null>(null);

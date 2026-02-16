@@ -18,7 +18,7 @@ export async function POST(req: Request) {
     return Response.json({ error: 'Invalid JSON' }, { status: 400 });
   }
 
-  const { message, currentTimestamp, segments, history, videoTitle, personality, transcriptSource, voiceMode, exploreMode, exploreGoal, modelChoice, thinkingBudget, curriculumContext, videoId, knowledgeContext, intervalSelection } = body;
+  const { message, currentTimestamp, segments, history, videoTitle, personality, transcriptSource, voiceMode, exploreMode, exploreGoal, modelChoice, thinkingBudget, curriculumContext, videoId, knowledgeContext, intervalSelection, demoGreeting } = body;
 
   if (!message || typeof message !== 'string') {
     return Response.json({ error: 'Missing message' }, { status: 400 });
@@ -104,6 +104,20 @@ export async function POST(req: Request) {
       intervalDesc,
     });
 
+    // Inject knowledge graph context if provided (from useKnowledgeContext)
+    const kgCtxExplore = knowledgeContext as KnowledgeContext | undefined;
+    if (kgCtxExplore?.video || (kgCtxExplore?.related_videos?.length ?? 0) > 0) {
+      const kgXml = buildKnowledgeGraphPromptContext(kgCtxExplore!);
+      if (kgXml) {
+        const cacheOpts = { anthropic: { cacheControl: { type: 'ephemeral' as const } } };
+        exploreParts.splice(1, 0, {
+          role: 'system' as const,
+          content: kgXml,
+          providerOptions: cacheOpts,
+        });
+      }
+    }
+
     // Inject curriculum context if provided (cross-video playlist context)
     if (typeof curriculumContext === 'string' && curriculumContext.length > 0) {
       const cacheOpts = { anthropic: { cacheControl: { type: 'ephemeral' as const } } };
@@ -134,11 +148,26 @@ export async function POST(req: Request) {
       messages.push({ role: 'user', content: message });
     }
 
+    // Create tools for explore mode if we have a valid video ID
+    const safeExploreVideoId = typeof videoId === 'string' && /^[a-zA-Z0-9_-]{11}$/.test(videoId) ? videoId : null;
+    const exploreTools = safeExploreVideoId
+      ? createVideoTools(safeExploreVideoId, typedSegments)
+      : undefined;
+
     const result = streamText({
       model,
       system: exploreParts,
       messages,
-      maxOutputTokens: 1500,
+      maxOutputTokens: 4000,
+      ...(exploreTools ? {
+        tools: exploreTools,
+        maxSteps: 4,
+        onStepFinish({ toolCalls, finishReason }) {
+          if (toolCalls.length > 0) {
+            console.log(`[explore] Tools: ${toolCalls.map((t: { toolName: string }) => t.toolName).join(', ')} | ${finishReason}`);
+          }
+        },
+      } : {}),
       providerOptions: {
         anthropic: {
           thinking: { type: 'enabled', budgetTokens },
@@ -146,11 +175,13 @@ export async function POST(req: Request) {
       },
     });
 
-    // Stream reasoning tokens + \x1E separator + text (enables ThinkingDepthIndicator on client)
+    // Stream reasoning tokens + \x1E separator + text + tool results (enables ThinkingDepthIndicator on client)
     const encoder = new TextEncoder();
     const stream = new ReadableStream({
       async start(controller) {
         let reasoningSent = false;
+        let textCharCount = 0;
+        const collectedToolResults: Array<{ toolName: string; result: unknown }> = [];
 
         try {
           for await (const chunk of result.fullStream) {
@@ -166,12 +197,69 @@ export async function POST(req: Request) {
                 controller.enqueue(encoder.encode('\x1E'));
                 reasoningSent = true;
               }
+              textCharCount += chunk.text.length;
               controller.enqueue(encoder.encode(chunk.text));
+            } else if (chunk.type === 'tool-result') {
+              if (!reasoningSent) {
+                controller.enqueue(encoder.encode('\x1E'));
+                reasoningSent = true;
+              }
+              const toolData = { toolName: chunk.toolName, result: chunk.output };
+              collectedToolResults.push(toolData);
+              try {
+                controller.enqueue(encoder.encode(`\x1D${JSON.stringify(toolData)}\x1D`));
+              } catch (toolErr) {
+                console.error(`Explore tool error (${chunk.toolName}):`, toolErr instanceof Error ? toolErr.message : toolErr);
+              }
             }
           }
 
           if (!reasoningSent) {
             controller.enqueue(encoder.encode('\x1E'));
+          }
+
+          // Continuation: if tools ran but produced zero prose, generate brief commentary
+          if (textCharCount === 0 && collectedToolResults.length > 0) {
+            console.log(`[explore] Continuation: ${collectedToolResults.length} tool results, ${textCharCount} chars text`);
+            const toolSummary = collectedToolResults.map(tr => {
+              const r = tr.result as Record<string, unknown>;
+              const compact: Record<string, unknown> = { type: r.type };
+              if (r.chain && Array.isArray(r.chain)) compact.chain_count = r.chain.length;
+              if (r.steps && Array.isArray(r.steps)) compact.steps_count = r.steps.length;
+              if (r.questions && Array.isArray(r.questions)) compact.question_count = r.questions.length;
+              if (r.alternatives && Array.isArray(r.alternatives)) compact.alt_count = r.alternatives.length;
+              if (r.concept) compact.concept = r.concept;
+              return `${tr.toolName}: ${JSON.stringify(compact)}`;
+            }).join('; ');
+
+            const continuation = streamText({
+              model,
+              system: exploreParts,
+              messages: [
+                ...messages,
+                {
+                  role: 'assistant' as const,
+                  content: `[Retrieved: ${toolSummary}. Cards shown above.]`,
+                },
+                {
+                  role: 'user' as const,
+                  content: '1-2 sentences connecting these results. Use [M:SS] for timestamps. No XML tags. End with 3-4 pill options: <options>opt1|opt2|opt3</options>',
+                },
+              ],
+              maxOutputTokens: 400,
+              providerOptions: {
+                anthropic: {
+                  thinking: { type: 'enabled', budgetTokens: 2000 },
+                },
+              },
+            });
+
+            for await (const chunk of continuation.fullStream) {
+              if (chunk.type === 'text-delta') {
+                controller.enqueue(encoder.encode(chunk.text));
+              }
+              // Skip reasoning from continuation — we only want the text
+            }
           }
         } catch (err) {
           console.error('Explore mode stream error:', err instanceof Error ? err.message : err);
@@ -205,6 +293,7 @@ export async function POST(req: Request) {
     transcriptSource: typeof transcriptSource === 'string' ? transcriptSource : undefined,
     voiceMode: !!voiceMode,
     intervalDesc,
+    demoGreeting: typeof demoGreeting === 'string' ? demoGreeting : undefined,
   });
 
   // Inject knowledge graph context if provided (from useKnowledgeContext)
@@ -268,38 +357,98 @@ export async function POST(req: Request) {
     model,
     system: systemParts,
     messages,
-    maxOutputTokens: voiceMode ? 500 : 8000,
-    ...(tools ? { tools, maxSteps: 3 } : {}),
+    maxOutputTokens: voiceMode ? 500 : (tools ? 4000 : 8000),
+    ...(tools ? {
+      tools,
+      maxSteps: 6,
+      onStepFinish({ toolCalls, finishReason, text }) {
+        const toolNames = toolCalls.map((t: { toolName: string }) => t.toolName).join(', ');
+        console.log(`[video-chat] Step done: reason=${finishReason} tools=[${toolNames}] textLen=${text?.length ?? 0}`);
+      },
+    } : {}),
   });
 
   // When tools are active, stream a custom format:
   // - Text deltas are streamed as-is
   // - Tool results are embedded as \x1D{json}\x1D (group separator delimited)
-  // This keeps backward compatibility with the existing text stream parser
+  //
+  // AI SDK multi-step (maxSteps) doesn't reliably produce a step 2 where the
+  // model writes prose after tool execution — Sonnet batches all tool calls in
+  // one turn with 0 text. Fix: after step 1 ends, make a concise continuation
+  // call WITHOUT tools so the model writes prose about the results.
   if (tools) {
     const encoder = new TextEncoder();
     const stream = new ReadableStream({
       async start(controller) {
+        let textCharCount = 0;
+        const collectedToolResults: Array<{ toolName: string; result: unknown }> = [];
         try {
           for await (const chunk of result.fullStream) {
             if (chunk.type === 'text-delta') {
+              textCharCount += chunk.text.length;
               controller.enqueue(encoder.encode(chunk.text));
             } else if (chunk.type === 'tool-result') {
-              // Embed tool result as delimited JSON
+              const toolData = { toolName: chunk.toolName, result: chunk.output };
+              collectedToolResults.push(toolData);
               try {
-                const toolData = JSON.stringify({
-                  toolName: chunk.toolName,
-                  result: chunk.output,
-                });
-                controller.enqueue(encoder.encode(`\x1D${toolData}\x1D`));
+                controller.enqueue(encoder.encode(`\x1D${JSON.stringify(toolData)}\x1D`));
               } catch (toolErr) {
                 console.error(`Tool result error (${chunk.toolName}):`, toolErr instanceof Error ? toolErr.message : toolErr);
-                const errorData = JSON.stringify({
-                  toolName: chunk.toolName,
-                  result: { type: 'error', message: `Tool "${chunk.toolName}" failed to produce results.` },
-                });
-                controller.enqueue(encoder.encode(`\x1D${errorData}\x1D`));
               }
+            }
+          }
+
+          // If tools ran but model produced no/minimal prose, make a brief
+          // continuation call to generate concise commentary.
+          if (textCharCount === 0 && collectedToolResults.length > 0) {
+            console.log(`[video-chat] No prose — continuation for ${collectedToolResults.length} tool results`);
+
+            // Compact summary: tool name + key fields only (keep under 2000 chars total)
+            const toolSummary = collectedToolResults.map(tr => {
+              const r = tr.result as Record<string, unknown>;
+              // Strip large arrays to just counts for brevity
+              const compact: Record<string, unknown> = { type: r.type };
+              if (r.chain && Array.isArray(r.chain)) compact.chain_count = r.chain.length;
+              if (r.steps && Array.isArray(r.steps)) compact.steps_count = r.steps.length;
+              if (r.questions && Array.isArray(r.questions)) compact.question_count = r.questions.length;
+              if (r.alternatives && Array.isArray(r.alternatives)) compact.alt_count = r.alternatives.length;
+              if (r.results && Array.isArray(r.results)) compact.result_count = r.results.length;
+              if (r.concept) compact.concept = r.concept;
+              if (r.from_concept) compact.from = r.from_concept;
+              if (r.to_concept) compact.to = r.to_concept;
+              if (r.message) compact.message = r.message;
+              return `${tr.toolName}: ${JSON.stringify(compact)}`;
+            }).join('; ');
+
+            const continuation = streamText({
+              model,
+              system: systemParts,
+              messages: [
+                ...messages,
+                {
+                  role: 'assistant' as const,
+                  content: `[I retrieved: ${toolSummary}. The UI already shows the full results as interactive cards above.]`,
+                },
+                {
+                  role: 'user' as const,
+                  content: 'Write 2-3 sentences connecting these results to my question. Use [M:SS] for any timestamps. Do NOT use XML tags, tool markup, or HTML. Do NOT repeat data the cards already show. Just add brief insight or a connecting thought.',
+                },
+              ],
+              maxOutputTokens: 500,
+              // NO tools — prose only
+            });
+
+            // Strip only known hallucinated tool markup (not all XML — preserve <options> pills)
+            let contBuffer = '';
+            for await (const chunk of continuation.textStream) {
+              contBuffer += chunk;
+            }
+            contBuffer = contBuffer
+              .replace(/<\/?(?:reference_?video|cite_?moment|search_?knowledge|tool_?call|tool_?result)[^>]*\/?>/gi, '')
+              .replace(/\n{3,}/g, '\n\n')
+              .trim();
+            if (contBuffer) {
+              controller.enqueue(encoder.encode(contBuffer));
             }
           }
         } catch (err) {

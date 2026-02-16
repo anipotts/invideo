@@ -113,4 +113,7 @@ export interface InteractionOverlayProps {
   playbackSpeed?: number;
   onSetSpeed?: (speed: number) => void;
   hasTranscript?: boolean;
+
+  /** Ref bridge for 3-level Escape stacking (drawer dismiss) */
+  drawerRef?: import("react").RefObject<{ isOpen: boolean; dismiss: () => void } | null>;
 }

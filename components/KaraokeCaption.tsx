@@ -2,17 +2,12 @@
 
 import { useMemo } from 'react';
 import type { TranscriptSegment } from '@/lib/video-utils';
-import { getSegmentDuration } from '@/lib/video-utils';
+import { getSegmentDuration, computeWordTimings } from '@/lib/video-utils';
+import type { WordTiming } from '@/lib/video-utils';
 
 interface KaraokeCaptionProps {
   segments: TranscriptSegment[];
   currentTime: number;
-}
-
-interface WordTiming {
-  text: string;
-  startMs: number;
-  endMs: number;
 }
 
 interface ActiveResult {
@@ -67,44 +62,6 @@ function findActiveSegment(
   }
 
   return null;
-}
-
-/**
- * Build word timings with computed end times.
- * Uses json3 word-level data when available, falls back to
- * character-count interpolation across the segment duration.
- */
-function computeWordTimings(
-  segment: TranscriptSegment,
-  duration: number,
-): WordTiming[] {
-  const segEndMs = (segment.offset + duration) * 1000;
-
-  if (segment.words && segment.words.length > 0) {
-    return segment.words.map((w, i, arr) => ({
-      text: w.text,
-      startMs: w.startMs,
-      endMs: i + 1 < arr.length ? arr[i + 1].startMs : segEndMs,
-    }));
-  }
-
-  // Fallback: character-count proportional interpolation
-  const words = segment.text.trim().split(/\s+/);
-  if (words.length === 0 || (words.length === 1 && words[0] === '')) return [];
-
-  const totalChars = words.reduce((sum, w) => sum + w.length, 0);
-  if (totalChars === 0) return [];
-
-  const segStartMs = segment.offset * 1000;
-  const segDurMs = duration * 1000;
-  let charsSoFar = 0;
-
-  return words.map((w) => {
-    const startMs = segStartMs + (charsSoFar / totalChars) * segDurMs;
-    charsSoFar += w.length;
-    const endMs = segStartMs + (charsSoFar / totalChars) * segDurMs;
-    return { text: w, startMs, endMs };
-  });
 }
 
 const BOUNDARY_WORDS = new Set([
