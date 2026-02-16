@@ -4,7 +4,8 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
-import { MonitorPlay, ArrowBendUpLeft } from '@phosphor-icons/react';
+import { ArrowBendUpLeft } from '@phosphor-icons/react';
+import { ChalkIcon } from '@/components/ChalkIcon';
 
 // --- SVG Icon Helpers ---
 
@@ -227,8 +228,8 @@ export default function PlaylistPage() {
           <Link href="/" className="text-slate-400 hover:text-chalk-text transition-colors" aria-label="Back to home">
             <ArrowBendUpLeft size={20} weight="bold" />
           </Link>
-          <Link href="/" className="flex items-center gap-1.5 text-chalk-text">
-            <MonitorPlay size={20} />
+          <Link href="/" className="group flex items-center gap-1.5 text-chalk-text">
+            <ChalkIcon size={20} />
             <span className="text-sm font-semibold">InVideo</span>
           </Link>
         </div>

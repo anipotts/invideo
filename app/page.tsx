@@ -3,7 +3,8 @@
 import { useState, useEffect, useRef, useCallback, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { extractVideoId } from '@/lib/video-utils';
-import { MonitorPlay, Binoculars } from '@phosphor-icons/react';
+import { Binoculars } from '@phosphor-icons/react';
+import { ChalkIcon } from '@/components/ChalkIcon';
 import { SearchResults } from '@/components/SearchResults';
 import type { AnySearchResult } from '@/components/SearchResults';
 import { storageKey } from '@/lib/brand';
@@ -399,8 +400,8 @@ function HomePage() {
         <div className="w-full max-w-2xl pointer-events-auto">
           {/* Logo and tagline */}
           <div className="text-center mb-5">
-            <h1 className="text-2xl font-semibold text-white/90 mb-1.5 flex items-center justify-center gap-2 tracking-tight">
-              <MonitorPlay size={26} weight="light" />
+            <h1 className="group text-2xl font-semibold text-white/90 mb-1.5 flex items-center justify-center gap-2 tracking-tight">
+              <ChalkIcon size={26} />
               InVideo
             </h1>
             <p className="text-[13px] text-white/30 tracking-wide">
