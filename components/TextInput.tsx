@@ -280,7 +280,7 @@ export function TextInput({
         />
       </div>
       <div className="flex items-center justify-between px-1.5 pb-1.5">
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-2.5">
           {onToggleExplore && (
             <button
               type="button"
@@ -299,7 +299,7 @@ export function TextInput({
           )}
           {leftActions}
         </div>
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-2.5">
           {actions}
         </div>
       </div>
