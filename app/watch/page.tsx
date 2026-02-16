@@ -5,14 +5,23 @@ import { useSearchParams, useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
 import { TranscriptPanel } from "@/components/TranscriptPanel";
 import { InteractionOverlay } from "@/components/InteractionOverlay";
+import {
+  VoiceProvider,
+  LearnProvider,
+  ExploreProvider,
+  ReadAloudProvider,
+  InVideoProvider,
+} from "@/components/overlay-contexts";
+import type { LearnState, LearnHandlers } from "@/components/overlay-types";
 import { useTranscriptStream } from "@/hooks/useTranscriptStream";
 import { useVideoTitle } from "@/hooks/useVideoTitle";
 import { useOverlayPhase } from "@/hooks/useOverlayPhase";
 import { formatTimestamp, type IntervalSelection } from "@/lib/video-utils";
 import { storageKey } from "@/lib/brand";
-import { ChalkboardSimple, Play, ArrowBendUpLeft, MagnifyingGlass, SpinnerGap, CheckCircle, WarningCircle } from "@phosphor-icons/react";
-import { ChalkIcon } from "@/components/ChalkIcon";
+import { ChalkboardSimple, Play, ArrowBendUpLeft, SpinnerGap, CheckCircle, WarningCircle } from "@phosphor-icons/react";
 import { KaraokeCaption } from "@/components/KaraokeCaption";
+import { AppBar } from "@/components/AppBar";
+import { VoiceCloneConsent } from "@/components/VoiceCloneConsent";
 import type { MediaPlayerInstance } from "@vidstack/react";
 
 import { useUnifiedMode } from "@/hooks/useUnifiedMode";
@@ -21,8 +30,7 @@ import { useLearnMode } from "@/hooks/useLearnMode";
 import { useLearnOptions } from "@/hooks/useLearnOptions";
 import { useCurriculumContext } from "@/hooks/useCurriculumContext";
 import { useKnowledgeContext } from "@/hooks/useKnowledgeContext";
-import { SideVideoPanel, type SideVideoEntry } from "@/components/SideVideoPanel";
-import SearchDropdown from "@/components/SearchDropdown";
+import type { SideVideoEntry } from "@/components/SideVideoPanel";
 import { parseStoryboardSpec } from "@/lib/storyboard";
 import { ChapterTimeline } from "@/components/ChapterTimeline";
 
@@ -45,87 +53,6 @@ const VideoPlayer = dynamic(
     ),
   },
 );
-
-const SPEED_PRESETS = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
-
-function SpeedControlButton({
-  playerRef,
-}: {
-  playerRef: React.RefObject<MediaPlayerInstance | null>;
-}) {
-  const [open, setOpen] = useState(false);
-  const [speed, setSpeed] = useState(1);
-  const ref = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    const interval = setInterval(() => {
-      try {
-        if (playerRef.current) setSpeed(playerRef.current.playbackRate);
-      } catch {
-        /* Vidstack $state proxy may throw during teardown */
-      }
-    }, 500);
-    return () => clearInterval(interval);
-  }, [playerRef]);
-
-  useEffect(() => {
-    if (!open) return;
-    function handleClick(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node))
-        setOpen(false);
-    }
-    document.addEventListener("mousedown", handleClick);
-    return () => document.removeEventListener("mousedown", handleClick);
-  }, [open]);
-
-  const handleSelect = (s: number) => {
-    try {
-      if (playerRef.current) {
-        playerRef.current.playbackRate = s;
-        setSpeed(s);
-        localStorage.setItem(storageKey("playback-speed"), String(s));
-      }
-    } catch {
-      /* Vidstack $state proxy may throw */
-    }
-    setOpen(false);
-  };
-
-  return (
-    <div ref={ref} className="relative">
-      <button
-        onClick={() => setOpen(!open)}
-        className={`px-1.5 py-1 rounded-lg text-[11px] font-mono font-medium transition-colors ${
-          speed !== 1
-            ? "bg-amber-500/15 text-amber-400 border border-amber-500/30"
-            : "text-slate-500 hover:text-slate-300 bg-chalk-surface/50 border border-chalk-border/30"
-        }`}
-        title="Playback speed"
-      >
-        {speed}x
-      </button>
-      {open && (
-        <div className="absolute right-0 top-full z-50 mt-2 w-28 rounded-xl border shadow-xl bg-chalk-surface border-chalk-border/40 shadow-black/30">
-          <div className="overflow-y-auto p-1 max-h-64">
-            {SPEED_PRESETS.map((s) => (
-              <button
-                key={s}
-                onClick={() => handleSelect(s)}
-                className={`w-full text-left px-3 py-1.5 rounded-lg text-xs transition-colors ${
-                  speed === s
-                    ? "bg-chalk-accent/15 text-chalk-accent font-medium"
-                    : "text-slate-400 hover:text-chalk-text hover:bg-chalk-bg/40"
-                }`}
-              >
-                {s}x{s === 1 ? " (Normal)" : ""}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
 
 /* --- Mobile collapse/expand components --- */
 
@@ -186,8 +113,6 @@ function WatchContent() {
   const shouldAutoplay = searchParams.get("autoplay") === "1";
   const forceStt = searchParams.get("force-stt") === "true";
   const navRouter = useRouter();
-  const [navSearchValue, setNavSearchValue] = useState("");
-  const [navSearchFocused, setNavSearchFocused] = useState(false);
 
   const { segments, status, statusMessage, error, source, progress, durationSeconds, metadata, storyboardSpec, queueProgress } =
     useTranscriptStream(videoId || null, forceStt);
@@ -209,11 +134,12 @@ function WatchContent() {
 
   const [showTranscript, setShowTranscript] = useState(false);
   const [showCaptions, setShowCaptions] = useState(false);
-  const [sideStack, setSideStack] = useState<SideVideoEntry[]>([]);
+  const [inVideoEntry, setInVideoEntry] = useState<SideVideoEntry | null>(null);
   const [selectedInterval, setSelectedInterval] = useState<IntervalSelection | null>(null);
   const [continueFrom, setContinueFrom] = useState<number | null>(null);
   const [keyboardOpen, setKeyboardOpen] = useState(false);
   const [transcriptCollapsed, setTranscriptCollapsed] = useState(false);
+  const [playbackSpeed, setPlaybackSpeed] = useState(1);
 
   // Load preferences after mount to avoid hydration mismatch
   useEffect(() => {
@@ -341,10 +267,10 @@ function WatchContent() {
   }, [videoId, effectiveTitle, effectiveChannel]);
 
   // Voice clone hook — now channel-level
-  const { voiceId, isCloning } = useVoiceClone({
+  const { voiceId, isCloning, needsConsent, grantConsent, declineConsent } = useVoiceClone({
     videoId: videoId || null,
     channelName: effectiveChannel,
-    enabled: chatting,
+    enabled: true, // eagerly clone on page load so voiceId is ready before first chat
   });
 
   // Knowledge graph context (populated by batch enrichment)
@@ -477,6 +403,20 @@ function WatchContent() {
     return () => vv.removeEventListener("resize", handleResize);
   }, []);
 
+  const handleRateChange = useCallback((rate: number) => {
+    setPlaybackSpeed(rate);
+  }, []);
+
+  const handleSetSpeed = useCallback((speed: number) => {
+    try {
+      if (playerRef.current) {
+        playerRef.current.playbackRate = speed;
+        setPlaybackSpeed(speed);
+        localStorage.setItem(storageKey("playback-speed"), String(speed));
+      }
+    } catch { /* Vidstack proxy may throw */ }
+  }, []);
+
   const handlePause = useCallback(() => {
     setIsPaused(true);
   }, []);
@@ -501,15 +441,6 @@ function WatchContent() {
     }
   }, []);
 
-  const startVoiceMode = useCallback(() => {
-    try {
-      wasPlayingBeforeVoice.current = !playerRef.current?.paused;
-      playerRef.current?.pause();
-    } catch { /* ignore */ }
-    overlayDispatch({ type: 'VOICE_START' });
-    setTimeout(() => inputRef.current?.focus(), 100);
-  }, [overlayDispatch]);
-
   const handleAskAbout = useCallback((_timestamp: number, _text: string) => {
     overlayDispatch({ type: 'CONTENT_ARRIVED' });
     setTimeout(() => inputRef.current?.focus(), 100);
@@ -523,24 +454,24 @@ function WatchContent() {
     setSelectedInterval(null);
   }, []);
 
-  // Side panel: open a reference video
+  // InVideo panel: open a reference video inside the overlay
+  const wasPlayingBeforeInVideoRef = useRef(false);
   const handleOpenVideo = useCallback((vid: string, title: string, channelName: string, seekTo?: number) => {
-    setSideStack(prev => {
-      const entry: SideVideoEntry = { videoId: vid, title, channelName, seekTo };
-      // Max stack depth 2
-      if (prev.length >= 2) {
-        return [prev[0], entry];
-      }
-      return [...prev, entry];
-    });
+    setInVideoEntry({ videoId: vid, title, channelName, seekTo });
+    // Auto-pause main video
+    try {
+      wasPlayingBeforeInVideoRef.current = !playerRef.current?.paused;
+      playerRef.current?.pause();
+    } catch { /* Vidstack proxy may throw */ }
   }, []);
 
-  const handleSidePopVideo = useCallback(() => {
-    setSideStack(prev => prev.slice(0, -1));
-  }, []);
-
-  const handleSideClose = useCallback(() => {
-    setSideStack([]);
+  const handleCloseInVideo = useCallback(() => {
+    setInVideoEntry(null);
+    // Auto-resume main video if it was playing before
+    if (wasPlayingBeforeInVideoRef.current) {
+      try { playerRef.current?.play(); } catch { /* ignore */ }
+      wasPlayingBeforeInVideoRef.current = false;
+    }
   }, []);
 
   // Toggle explore mode (unified: subsumes both explore chat and learn mode)
@@ -582,11 +513,11 @@ function WatchContent() {
       const isEditable = (e.target as HTMLElement)?.isContentEditable;
       const inInput = tag === "INPUT" || tag === "TEXTAREA" || isEditable;
 
-      // Escape: close side panel first, then transition to watching
+      // Escape: close InVideo panel first, then transition to watching
       if (e.key === "Escape") {
         e.preventDefault();
-        if (sideStack.length > 0) {
-          setSideStack([]);
+        if (inVideoEntry) {
+          handleCloseInVideo();
           return;
         }
         overlayDispatch({ type: 'ESCAPE' });
@@ -597,51 +528,6 @@ function WatchContent() {
       // When typing in an input, don't capture shortcuts
       if (inInput) return;
 
-      // V key: open voice mode
-      if (e.key === "v" && !e.metaKey && !e.ctrlKey && !e.altKey) {
-        e.preventDefault();
-        startVoiceMode();
-        return;
-      }
-
-      // Player shortcuts — only when watching (not chatting)
-      if (phase === 'watching') {
-        try {
-          const player = playerRef.current;
-          if (player) {
-            if (e.key === " " || e.key === "k") {
-              e.preventDefault();
-              if (player.paused) player.play(); else player.pause();
-              return;
-            }
-            if (e.key === "j") {
-              e.preventDefault();
-              player.currentTime = Math.max(0, player.currentTime - 10);
-              return;
-            }
-            if (e.key === "l") {
-              e.preventDefault();
-              player.currentTime += 10;
-              return;
-            }
-            if (e.key === "ArrowLeft") {
-              e.preventDefault();
-              player.currentTime = Math.max(0, player.currentTime - 5);
-              return;
-            }
-            if (e.key === "ArrowRight") {
-              e.preventDefault();
-              player.currentTime += 5;
-              return;
-            }
-          }
-        } catch { /* Vidstack $state proxy may throw */ }
-      }
-
-      // Other player keys — don't capture as type-to-activate
-      const otherPlayerKeys = new Set(["f", ",", ".", "<", ">", "ArrowUp", "ArrowDown"]);
-      if (otherPlayerKeys.has(e.key)) return;
-
       // Tab or / (slash): activate chat + focus (no character injection)
       if (e.key === "Tab" || e.key === "/") {
         e.preventDefault();
@@ -650,14 +536,26 @@ function WatchContent() {
         return;
       }
 
-      // Any other printable character (no Ctrl/Meta/Alt): type-to-activate
+      // Any printable character (no Ctrl/Meta/Alt): type-to-activate.
+      // No player keybinds — every keystroke goes to the chat input.
+      // Player controls are accessible via the Vidstack UI (click to play/pause, scrub timeline, etc.)
       if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
         e.preventDefault();
         overlayDispatch({ type: 'ACTIVATE' });
         requestAnimationFrame(() => {
           if (inputRef.current) {
             inputRef.current.focus();
-            document.execCommand('insertText', false, e.key);
+            const sel = window.getSelection();
+            if (sel) {
+              const range = document.createRange();
+              range.selectNodeContents(inputRef.current);
+              range.collapse(false);
+              range.insertNode(document.createTextNode(e.key));
+              range.collapse(false);
+              sel.removeAllRanges();
+              sel.addRange(range);
+              inputRef.current.dispatchEvent(new Event('input', { bubbles: true }));
+            }
           }
         });
         return;
@@ -665,7 +563,7 @@ function WatchContent() {
     }
     document.addEventListener("keydown", handleKey);
     return () => document.removeEventListener("keydown", handleKey);
-  }, [startVoiceMode, overlayDispatch, phase]);
+  }, [overlayDispatch, phase, inVideoEntry, handleCloseInVideo]);
 
   // Click-away: dismiss chat overlay when clicking outside
   useEffect(() => {
@@ -702,6 +600,7 @@ function WatchContent() {
   }, [unified.exchanges.length, unified.isTextStreaming, overlayDispatch]);
 
   // Auto-pause video during voice mode, auto-resume when idle
+  // Only resume if phase is 'watching' — chatting phase manages its own pause/resume
   useEffect(() => {
     if (unified.voiceState === 'recording') {
       try {
@@ -709,12 +608,73 @@ function WatchContent() {
         playerRef.current?.pause();
       } catch { /* Vidstack proxy may throw */ }
     } else if (unified.voiceState === 'idle') {
-      if (wasPlayingBeforeVoice.current) {
+      if (wasPlayingBeforeVoice.current && phase === 'watching') {
         try { playerRef.current?.play(); } catch { /* ignore */ }
-        wasPlayingBeforeVoice.current = false;
       }
+      wasPlayingBeforeVoice.current = false;
     }
-  }, [unified.voiceState]);
+  }, [unified.voiceState, phase]);
+
+  // Memoized context values for overlay providers
+  const learnStateMemo = useMemo<LearnState>(() => ({
+    phase: learnMode.phase,
+    selectedAction: learnMode.selectedAction,
+    quiz: learnMode.currentQuiz,
+    explanation: learnMode.currentExplanation,
+    introText: learnMode.introText,
+    responseContent: learnMode.responseContent,
+    exportableContent: learnMode.exportableContent,
+    answers: learnMode.answers,
+    score: learnMode.score,
+    thinking: learnMode.thinking,
+    thinkingDuration: learnMode.thinkingDuration,
+    isLoading: learnMode.isLoading,
+    error: learnMode.error,
+    options: learnOptions,
+    optionsLoading: learnOptionsLoading,
+  }), [
+    learnMode.phase, learnMode.selectedAction, learnMode.currentQuiz,
+    learnMode.currentExplanation, learnMode.introText, learnMode.responseContent,
+    learnMode.exportableContent, learnMode.answers, learnMode.score,
+    learnMode.thinking, learnMode.thinkingDuration, learnMode.isLoading,
+    learnMode.error, learnOptions, learnOptionsLoading,
+  ]);
+
+  const learnHandlersMemo = useMemo<LearnHandlers>(() => ({
+    onSelectAction: learnMode.executeAction,
+    onFocusInput: handleFocusInput,
+    onSelectAnswer: learnMode.selectAnswer,
+    onNextBatch: learnMode.requestNextBatch,
+    onStop: learnMode.stopLearnMode,
+  }), [learnMode.executeAction, handleFocusInput, learnMode.selectAnswer, learnMode.requestNextBatch, learnMode.stopLearnMode]);
+
+  const exploreValue = useMemo(() => ({
+    exploreMode: unified.exploreMode,
+    onToggle: toggleExploreMode,
+    onSubmit: unified.handleExploreSubmit,
+    onStop: unified.stopExploreStream,
+    error: unified.exploreError,
+    pills: unified.explorePills,
+    isThinking: unified.isThinking,
+    thinkingDuration: unified.thinkingDuration,
+  }), [
+    unified.exploreMode, toggleExploreMode, unified.handleExploreSubmit,
+    unified.stopExploreStream, unified.exploreError, unified.explorePills,
+    unified.isThinking, unified.thinkingDuration,
+  ]);
+
+  const readAloudValue = useMemo(() => ({
+    autoReadAloud: unified.autoReadAloud,
+    onToggle: unified.setAutoReadAloud,
+    playingMessageId: unified.playingMessageId,
+    onPlay: unified.playMessage,
+    isLoading: unified.isReadAloudLoading,
+  }), [unified.autoReadAloud, unified.setAutoReadAloud, unified.playingMessageId, unified.playMessage, unified.isReadAloudLoading]);
+
+  const inVideoValue = useMemo(() => ({
+    entry: inVideoEntry,
+    onClose: handleCloseInVideo,
+  }), [inVideoEntry, handleCloseInVideo]);
 
   if (!videoId) {
     return (
@@ -731,123 +691,76 @@ function WatchContent() {
 
   return (
     <div className="flex h-[100dvh] bg-chalk-bg overflow-hidden animate-in fade-in duration-300 px-safe">
-      {/* Main area — shrinks when side panel is open */}
-      <div className={`flex flex-col min-w-0 transition-[flex,width] duration-300 ease-out ${
-        sideStack.length > 0 ? "flex-1 min-w-0" : "flex-1"
-      }`}>
+      {/* Main area */}
+      <div className="flex flex-col min-w-0 flex-1">
         {/* Top bar — hidden on mobile */}
         <div className="hidden md:flex flex-col flex-none bg-chalk-bg/80 backdrop-blur-md relative z-20">
-          <div className="flex items-center gap-3 px-4 py-3">
-          {/* Left: chalk icon + compact search */}
-          <a
-            href="/"
-            className="group flex items-center gap-1.5 text-chalk-text hover:text-chalk-accent transition-colors shrink-0"
-            title="Home"
-          >
-            <ChalkIcon size={18} />
-            <span className="text-sm font-semibold">InVideo</span>
-          </a>
-          <div className="relative">
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                const val = navSearchValue.trim();
-                if (val) {
-                  navRouter.push(`/?q=${encodeURIComponent(val)}`);
-                  setNavSearchValue("");
-                  setNavSearchFocused(false);
-                }
-              }}
-              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-white/[0.04] border border-white/[0.08] focus-within:ring-1 focus-within:ring-chalk-accent/40 focus-within:border-chalk-accent/30 transition-colors w-48"
-            >
-              <MagnifyingGlass size={13} className="text-slate-500 shrink-0" />
-              <input
-                type="text"
-                value={navSearchValue}
-                onChange={(e) => setNavSearchValue(e.target.value)}
-                onFocus={() => setNavSearchFocused(true)}
-                onBlur={() => setTimeout(() => setNavSearchFocused(false), 200)}
-                placeholder="Search videos, channels..."
-                className="flex-1 bg-transparent text-xs text-chalk-text placeholder:text-slate-600 focus:outline-none min-w-0"
-              />
-            </form>
-            <SearchDropdown
-              isVisible={navSearchFocused && !navSearchValue.trim()}
-              onSelectTopic={() => {}}
-            />
-          </div>
-          <span className="text-slate-600/50">|</span>
-          {/* Video thumbnail */}
-          <img
-            src={`https://i.ytimg.com/vi/${videoId}/mqdefault.jpg`}
-            alt=""
-            className="w-9 h-5 rounded-[3px] object-cover bg-chalk-surface/30 shrink-0"
+          <AppBar
+            compact
+            trailing={
+              <>
+                {/* Video context */}
+                <img
+                  src={`https://i.ytimg.com/vi/${videoId}/mqdefault.jpg`}
+                  alt=""
+                  className="w-14 h-8 rounded object-cover bg-chalk-surface/30 shrink-0 cursor-pointer ring-1 ring-transparent hover:ring-chalk-accent/50 transition-all"
+                />
+                <div className="flex-1 min-w-0 flex flex-col gap-0.5">
+                  <div className="flex items-center gap-1.5">
+                    {effectiveChannel && (
+                      <span className="text-[10px] text-slate-500 truncate">
+                        {effectiveChannel}
+                      </span>
+                    )}
+                    <a
+                      href={`https://www.youtube.com/watch?v=${videoId}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="shrink-0 text-slate-600 hover:text-[#FF0000] transition-colors"
+                      title="Open on YouTube"
+                    >
+                      <svg width="12" height="9" viewBox="0 0 20 14" fill="currentColor">
+                        <path d="M19.6 2.2A2.5 2.5 0 0 0 17.8.4C16.3 0 10 0 10 0S3.7 0 2.2.4A2.5 2.5 0 0 0 .4 2.2C0 3.7 0 7 0 7s0 3.3.4 4.8a2.5 2.5 0 0 0 1.8 1.8C3.7 14 10 14 10 14s6.3 0 7.8-.4a2.5 2.5 0 0 0 1.8-1.8C20 10.3 20 7 20 7s0-3.3-.4-4.8zM8 10V4l5.2 3L8 10z"/>
+                      </svg>
+                    </a>
+                  </div>
+                  <span className="text-xs truncate text-slate-400">
+                    {effectiveTitle || videoId}
+                  </span>
+                </div>
+
+                {/* Hint text */}
+                {phase === 'watching' && effectiveChannel && (
+                  <span className="hidden lg:inline text-xs whitespace-nowrap pointer-events-none text-slate-500 shrink-0">
+                    Start typing to talk to {effectiveChannel}
+                  </span>
+                )}
+
+                <div className="flex gap-2 items-center ml-auto shrink-0">
+                  <button
+                    onClick={() => setShowTranscript((v) => !v)}
+                    className={`hidden md:inline-flex items-center gap-1.5 py-1.5 rounded-lg text-[11px] font-medium transition-all duration-200 ease-out overflow-hidden whitespace-nowrap ${
+                      showTranscript
+                        ? 'max-w-0 opacity-0 px-0 border-transparent scale-95 pointer-events-none'
+                        : 'max-w-40 opacity-100 px-2.5 scale-100 text-slate-500 hover:text-slate-300 bg-chalk-surface/50 border border-chalk-border/30'
+                    }`}
+                    tabIndex={showTranscript ? -1 : 0}
+                  >
+                    Transcript
+                    {(status === 'connecting' || status === 'extracting' || status === 'queued' || status === 'transcribing') && (
+                      <SpinnerGap size={12} weight="bold" className="animate-spin text-slate-400" />
+                    )}
+                    {status === 'complete' && (
+                      <CheckCircle size={12} weight="fill" className="text-emerald-400" />
+                    )}
+                    {status === 'error' && (
+                      <WarningCircle size={12} weight="fill" className="text-red-400" />
+                    )}
+                  </button>
+                </div>
+              </>
+            }
           />
-          <div className="flex-1 min-w-0 flex flex-col gap-0.5">
-            <div className="flex items-center gap-1.5">
-              {effectiveChannel && (
-                <span className="text-[10px] text-slate-500 truncate">
-                  {effectiveChannel}
-                </span>
-              )}
-              <a
-                href={`https://www.youtube.com/watch?v=${videoId}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="shrink-0 text-slate-600 hover:text-[#FF0000] transition-colors"
-                title="Open on YouTube"
-              >
-                <svg width="12" height="9" viewBox="0 0 20 14" fill="currentColor">
-                  <path d="M19.6 2.2A2.5 2.5 0 0 0 17.8.4C16.3 0 10 0 10 0S3.7 0 2.2.4A2.5 2.5 0 0 0 .4 2.2C0 3.7 0 7 0 7s0 3.3.4 4.8a2.5 2.5 0 0 0 1.8 1.8C3.7 14 10 14 10 14s6.3 0 7.8-.4a2.5 2.5 0 0 0 1.8-1.8C20 10.3 20 7 20 7s0-3.3-.4-4.8zM8 10V4l5.2 3L8 10z"/>
-                </svg>
-              </a>
-            </div>
-            <span className="text-xs truncate text-slate-400">
-              {effectiveTitle || videoId}
-            </span>
-          </div>
-
-          {/* Hint text */}
-          {phase === 'watching' && effectiveChannel && (
-            <span className="hidden lg:inline text-xs whitespace-nowrap pointer-events-none text-slate-500 shrink-0">
-              Start typing to talk to {effectiveChannel}
-            </span>
-          )}
-
-          <div className="flex gap-2 items-center ml-auto">
-            <SpeedControlButton playerRef={playerRef} />
-
-            <button
-              onClick={() => setShowCaptions((v) => !v)}
-              className={`hidden md:inline-flex px-2.5 py-1.5 rounded-lg text-[11px] font-medium transition-colors ${
-                showCaptions
-                  ? "bg-chalk-accent/15 text-chalk-accent border border-chalk-accent/30"
-                  : "text-slate-500 hover:text-slate-300 bg-chalk-surface/50 border border-chalk-border/30"
-              }`}
-            >
-              CC
-            </button>
-            <button
-              onClick={() => setShowTranscript((v) => !v)}
-              className={`hidden md:inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-medium transition-colors ${
-                showTranscript
-                  ? "bg-chalk-accent/15 text-chalk-accent border border-chalk-accent/30"
-                  : "text-slate-500 hover:text-slate-300 bg-chalk-surface/50 border border-chalk-border/30"
-              }`}
-            >
-              Transcript
-              {!showTranscript && (status === 'connecting' || status === 'extracting' || status === 'queued' || status === 'transcribing') && (
-                <SpinnerGap size={12} weight="bold" className="animate-spin text-blue-400" />
-              )}
-              {!showTranscript && status === 'complete' && (
-                <CheckCircle size={12} weight="fill" className="text-emerald-400" />
-              )}
-              {!showTranscript && status === 'error' && (
-                <WarningCircle size={12} weight="fill" className="text-red-400" />
-              )}
-            </button>
-          </div>
-          </div>
           {/* Chapter timeline — replaces header border-b */}
           {hasSegments && durationSeconds && durationSeconds > 0 ? (
             <ChapterTimeline
@@ -898,7 +811,6 @@ function WatchContent() {
           >
             CC
           </button>
-          <SpeedControlButton playerRef={playerRef} />
         </div>
 
         {/* Video area */}
@@ -926,6 +838,7 @@ function WatchContent() {
                   onPause={handlePause}
                   onPlay={handlePlay}
                   onTimeUpdate={handleTimeUpdate}
+                  onRateChange={handleRateChange}
                 />
                 {/* Mobile: absolute overlay captions */}
                 {showCaptions && hasSegments && !chatting && (
@@ -936,6 +849,16 @@ function WatchContent() {
                     />
                   </div>
                 )}
+                {/* Desktop: captions inside video, centered in bottom controls bar */}
+                {showCaptions && hasSegments && (
+                  <div className={`hidden md:flex absolute left-0 right-0 bottom-[12px] z-10 justify-center pointer-events-none transition-opacity duration-200 ${
+                    phase === 'watching' ? 'opacity-100' : 'opacity-0'
+                  }`}>
+                    <div className="px-3 py-1 rounded-md bg-black/60 backdrop-blur-sm">
+                      <KaraokeCaption segments={segments} currentTime={currentTime} />
+                    </div>
+                  </div>
+                )}
                 {/* Time chip — top-right of video */}
                 {currentTime > 0 && (
                   <button
@@ -944,8 +867,18 @@ function WatchContent() {
                       requestAnimationFrame(() => {
                         if (inputRef.current) {
                           inputRef.current.focus();
-                          document.execCommand('selectAll');
-                          document.execCommand('insertText', false, `What's happening at [${Math.floor(currentTime / 60)}:${Math.floor(currentTime % 60).toString().padStart(2, '0')}]?`);
+                          const text = `What's happening at [${Math.floor(currentTime / 60)}:${Math.floor(currentTime % 60).toString().padStart(2, '0')}]?`;
+                          inputRef.current.textContent = '';
+                          inputRef.current.appendChild(document.createTextNode(text));
+                          const sel = window.getSelection();
+                          if (sel) {
+                            const range = document.createRange();
+                            range.selectNodeContents(inputRef.current);
+                            range.collapse(false);
+                            sel.removeAllRanges();
+                            sel.addRange(range);
+                          }
+                          inputRef.current.dispatchEvent(new Event('input', { bubbles: true }));
                         }
                       });
                     }}
@@ -957,103 +890,68 @@ function WatchContent() {
               </div>
 
               {/* Unified interaction overlay (text + voice + learn) — inside container */}
-              <InteractionOverlay
-                phase={phase}
-                segments={segments}
-                currentTime={currentTime}
-                videoId={videoId}
-                videoTitle={effectiveTitle ?? undefined}
-                transcriptSource={source ?? undefined}
-                voiceId={voiceId}
-                isVoiceCloning={isCloning}
-                // Voice state
+              <VoiceProvider
                 voiceState={unified.voiceState}
-                voiceTranscript={unified.voiceTranscript}
-                voiceResponseText={unified.voiceResponseText}
-                voiceError={unified.voiceError}
-                recordingDuration={unified.recordingDuration}
-                onStartRecording={unified.startRecording}
-                onStopRecording={unified.stopRecording}
-                onCancelRecording={unified.cancelRecording}
+                onStart={unified.startRecording}
+                onStop={unified.stopRecording}
+                onCancel={unified.cancelRecording}
                 onStopPlayback={unified.stopPlayback}
-                // Text state
-                isTextStreaming={unified.isTextStreaming}
-                currentUserText={unified.currentUserText}
-                currentAiText={unified.currentAiText}
-                currentToolCalls={unified.currentToolCalls}
-                currentRawAiText={unified.currentRawAiText}
-                textError={unified.textError}
-                onTextSubmit={unified.handleTextSubmit}
-                onStopTextStream={unified.stopTextStream}
-                onOpenVideo={handleOpenVideo}
-                // Read aloud
-                autoReadAloud={unified.autoReadAloud}
-                onToggleAutoReadAloud={unified.setAutoReadAloud}
-                playingMessageId={unified.playingMessageId}
-                onPlayMessage={unified.playMessage}
-                isReadAloudLoading={unified.isReadAloudLoading}
-                // Unified state
-                exchanges={unified.exchanges}
-                onClearHistory={unified.clearHistory}
-                onSeek={handleSeek}
-                onClose={() => overlayDispatch({ type: 'CLOSE' })}
-                inputRef={inputRef}
-                onInputFocus={() => overlayDispatch({ type: 'ACTIVATE' })}
-                onInputBlur={() => {}}
-                // Learn mode
-                learnPhase={learnMode.phase}
-                learnSelectedAction={learnMode.selectedAction}
-                learnQuiz={learnMode.currentQuiz}
-                learnExplanation={learnMode.currentExplanation}
-                learnIntroText={learnMode.introText}
-                learnResponseContent={learnMode.responseContent}
-                learnExportableContent={learnMode.exportableContent}
-                learnAnswers={learnMode.answers}
-                learnScore={learnMode.score}
-                learnThinking={learnMode.thinking}
-                learnThinkingDuration={learnMode.thinkingDuration}
-                learnLoading={learnMode.isLoading}
-                learnError={learnMode.error}
-                learnOptions={learnOptions}
-                learnOptionsLoading={learnOptionsLoading}
-                onOpenLearnMode={handleOpenLearnMode}
-                onSelectAction={learnMode.executeAction}
-                onFocusInput={handleFocusInput}
-                onSelectAnswer={learnMode.selectAnswer}
-                onNextBatch={learnMode.requestNextBatch}
-                onStopLearnMode={learnMode.stopLearnMode}
-                curriculumContext={curriculum.curriculumContext}
-                curriculumVideoCount={curriculum.videoCount}
-                // Explore mode (from unified)
-                exploreMode={unified.exploreMode}
-                onToggleExploreMode={toggleExploreMode}
-                onExploreSubmit={unified.handleExploreSubmit}
-                onStopExploreStream={unified.stopExploreStream}
-                exploreError={unified.exploreError}
-                explorePills={unified.explorePills}
-                isThinking={unified.isThinking}
-                thinkingDuration={unified.thinkingDuration}
-                sideOpen={sideStack.length > 0}
-                storyboardLevels={storyboardLevels}
-                interval={selectedInterval}
-                onClearInterval={handleIntervalClear}
-                isPaused={isPaused}
-              />
+                duration={unified.recordingDuration}
+                error={unified.voiceError}
+              >
+                <LearnProvider state={learnStateMemo} handlers={learnHandlersMemo}>
+                  <ExploreProvider value={exploreValue}>
+                    <ReadAloudProvider value={readAloudValue}>
+                      <InVideoProvider value={inVideoValue}>
+                        <InteractionOverlay
+                          phase={phase}
+                          segments={segments}
+                          currentTime={currentTime}
+                          videoId={videoId}
+                          videoTitle={effectiveTitle ?? undefined}
+                          transcriptSource={source ?? undefined}
+                          isTextStreaming={unified.isTextStreaming}
+                          currentUserText={unified.currentUserText}
+                          currentAiText={unified.currentAiText}
+                          currentToolCalls={unified.currentToolCalls}
+                          currentRawAiText={unified.currentRawAiText}
+                          textError={unified.textError}
+                          onTextSubmit={unified.handleTextSubmit}
+                          onStopTextStream={unified.stopTextStream}
+                          voiceTranscript={unified.voiceTranscript}
+                          voiceResponseText={unified.voiceResponseText}
+                          onOpenVideo={handleOpenVideo}
+                          exchanges={unified.exchanges}
+                          onClearHistory={unified.clearHistory}
+                          onSeek={handleSeek}
+                          onClose={() => overlayDispatch({ type: 'CLOSE' })}
+                          inputRef={inputRef}
+                          onInputFocus={() => overlayDispatch({ type: 'ACTIVATE' })}
+                          onInputBlur={() => {}}
+                          curriculumContext={curriculum.curriculumContext}
+                          curriculumVideoCount={curriculum.videoCount}
+                          storyboardLevels={storyboardLevels}
+                          interval={selectedInterval}
+                          onClearInterval={handleIntervalClear}
+                          isPaused={isPaused}
+                          showCaptions={showCaptions}
+                          onToggleCaptions={() => setShowCaptions(v => !v)}
+                          playbackSpeed={playbackSpeed}
+                          onSetSpeed={handleSetSpeed}
+                          hasTranscript={hasSegments}
+                        />
+                      </InVideoProvider>
+                    </ReadAloudProvider>
+                  </ExploreProvider>
+                </LearnProvider>
+              </VoiceProvider>
 
-              {/* Desktop captions — single line, fixed height prevents layout shift */}
-              {showCaptions && hasSegments && (
-                <div className={`hidden md:flex items-center justify-center h-8 mt-2 overflow-hidden transition-opacity duration-200 ${
-                  phase === 'watching' ? 'opacity-100' : 'opacity-0 pointer-events-none'
-                }`}>
-                  <KaraokeCaption segments={segments} currentTime={currentTime} />
-                </div>
-              )}
 
-              {/* Video border — blue when playing, neutral when paused */}
+              {/* Video border — subtle white when playing, faint when paused */}
               <div
                 data-video-border
                 className={`hidden md:block absolute top-0 left-0 right-0 aspect-video max-h-[calc(100dvh-14rem)] rounded-xl border-[4px] pointer-events-none z-30 transition-colors duration-300 ease-out ${
-                  isPaused ? 'border-white/[0.12]' : 'border-chalk-accent/90'
+                  isPaused ? 'border-white/[0.08]' : 'border-white/[0.25]'
                 }`}
               />
             </div>
@@ -1113,28 +1011,10 @@ function WatchContent() {
         <div className="flex-none md:hidden bg-chalk-bg pb-safe" />
       </div>
 
-      {/* Side video panel — 400px fixed when open (desktop only) */}
-      <div
-        className={`hidden md:flex flex-none overflow-hidden transition-[width] duration-300 ease-out ${
-          sideStack.length > 0 ? "border-l w-[400px] border-chalk-border/30" : "w-0"
-        }`}
-      >
-        {sideStack.length > 0 && (
-          <div className="w-full h-full">
-            <SideVideoPanel
-              stack={sideStack}
-              onPop={handleSidePopVideo}
-              onClose={handleSideClose}
-              onOpenVideo={handleOpenVideo}
-            />
-          </div>
-        )}
-      </div>
-
       {/* Transcript sidebar — right (desktop), responsive widths */}
       <div
         className={`hidden md:flex flex-none overflow-hidden transition-[width] duration-[250ms] ease-out ${
-          showTranscript && sideStack.length === 0 ? "border-l lg:w-[320px] xl:w-[380px] border-chalk-border/30" : "w-0"
+          showTranscript ? "border-l lg:w-[320px] xl:w-[380px] border-chalk-border/30" : "w-0"
         }`}
       >
         <div className="lg:w-[320px] xl:w-[380px] flex-none h-full">
@@ -1156,6 +1036,15 @@ function WatchContent() {
           />
         </div>
       </div>
+
+      {/* Voice clone consent dialog — portal renders above everything */}
+      {needsConsent && (
+        <VoiceCloneConsent
+          channelName={effectiveChannel}
+          onAllow={grantConsent}
+          onDecline={declineConsent}
+        />
+      )}
     </div>
   );
 }

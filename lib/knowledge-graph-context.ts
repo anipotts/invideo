@@ -3,6 +3,7 @@
  * Server-safe — no React dependencies.
  */
 import type { KnowledgeContext } from '@/app/api/knowledge-context/route';
+import { CHANNEL_VOICES } from '@/lib/prompts/shared';
 
 export function buildKnowledgeGraphPromptContext(ctx: KnowledgeContext): string {
   if (!ctx.video && ctx.related_videos.length === 0 && ctx.concept_connections.length === 0) {
@@ -42,6 +43,17 @@ export function buildKnowledgeGraphPromptContext(ctx: KnowledgeContext): string 
       xml += `  video_id: ${v.video_id}\n`;
     }
     xml += '</related_videos>\n';
+
+    // Inject channel voice descriptions for the handoff feature
+    const channelNames = [...new Set(ctx.related_videos.map(v => v.channel_name).filter(Boolean) as string[])];
+    const voices = channelNames
+      .filter(name => CHANNEL_VOICES[name])
+      .map(name => `- ${name}: ${CHANNEL_VOICES[name]}`);
+    if (voices.length > 0) {
+      xml += '<channel_voices>\n';
+      xml += voices.join('\n') + '\n';
+      xml += '</channel_voices>\n';
+    }
   }
 
   if (ctx.concept_connections.length > 0) {

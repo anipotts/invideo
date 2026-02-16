@@ -3,7 +3,7 @@ export const BRAND = {
   name: 'InVideo',
   tagline: 'Learn from any YouTube video with AI.',
   icon: 'ChalkboardSimple', // @phosphor-icons/react component name
-  domain: 'invideo-app.vercel.app',
+  domain: 'chalk-tan.vercel.app',
 } as const;
 
 export const STORAGE_PREFIX = 'invideo';

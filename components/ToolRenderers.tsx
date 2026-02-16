@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { formatTimestamp } from '@/lib/video-utils';
 import { ArrowSquareOut } from '@phosphor-icons/react';
+import { ChalkIcon } from './ChalkIcon';
 
 // Tool result types matching the server-side tool outputs
 
@@ -249,6 +250,15 @@ export function ReferenceVideoCard({
         )}
       </div>
       <div className="flex flex-col items-center gap-1 flex-shrink-0">
+        {onOpenVideo && (
+          <button
+            onClick={(e) => { e.stopPropagation(); handleClick(); }}
+            className="group p-1.5 rounded-md text-chalk-accent/60 hover:text-chalk-accent hover:bg-chalk-accent/10 transition-colors"
+            title="Watch in chalk"
+          >
+            <ChalkIcon size={16} />
+          </button>
+        )}
         <button
           onClick={handleNewTab}
           className="p-1.5 rounded-md text-slate-500 hover:text-slate-300 hover:bg-white/[0.06] transition-all duration-150"

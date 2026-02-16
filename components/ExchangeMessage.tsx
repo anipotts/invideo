@@ -396,6 +396,108 @@ function SpeakerButton({ exchange, onPlay, isPlaying, isLoading }: { exchange: U
   );
 }
 
+/**
+ * Renders interleaved text + tool cards from raw AI text with tool markers,
+ * or falls back to separate text + tool lists for older exchanges.
+ * Extracted for reuse between committed and streaming paths.
+ */
+export function SegmentedContent({
+  rawAiText,
+  aiText,
+  exchangeId,
+  toolCalls,
+  onSeek,
+  videoId,
+  onOpenVideo,
+  suppressDrawerTools,
+}: {
+  rawAiText?: string;
+  aiText: string;
+  exchangeId: string;
+  toolCalls?: ToolCallData[];
+  onSeek: (seconds: number) => void;
+  videoId: string;
+  onOpenVideo?: (videoId: string, title: string, channelName: string, seekTo?: number) => void;
+  suppressDrawerTools?: boolean;
+}) {
+  if (rawAiText) {
+    const segments = parseStreamToSegments(rawAiText);
+    const drawerTools = segments
+      .filter((s): s is { type: 'tool'; toolCall: ToolCallData } =>
+        s.type === 'tool' && isDrawerTool(s.toolCall))
+      .map(s => s.toolCall);
+
+    return (
+      <>
+        {segments.map((seg, i) => {
+          if (seg.type === 'text') {
+            if (!seg.content.trim()) return null;
+            return <span key={`seg-${exchangeId}-${i}`}>{renderRichContent(seg.content, onSeek, videoId)}</span>;
+          }
+          if (seg.toolCall.result.type === 'cite_moment') {
+            return (
+              <ToolResultRenderer
+                key={`tool-${exchangeId}-${i}`}
+                toolCall={seg.toolCall}
+                onSeek={onSeek}
+                onOpenVideo={onOpenVideo}
+              />
+            );
+          }
+          if (isDrawerTool(seg.toolCall)) return null;
+          return (
+            <div key={`tool-${exchangeId}-${i}`} className="my-2">
+              <ToolResultRenderer
+                toolCall={seg.toolCall}
+                onSeek={onSeek}
+                onOpenVideo={onOpenVideo}
+              />
+            </div>
+          );
+        })}
+        {!suppressDrawerTools && drawerTools.length > 0 && (
+          <CompactToolStrip toolCalls={drawerTools} onSeek={onSeek} onOpenVideo={onOpenVideo} />
+        )}
+      </>
+    );
+  }
+
+  // Fallback: text then tool calls (backward compat for exchanges without rawAiText)
+  const allTools = toolCalls || [];
+  const drawerTools = allTools.filter(tc => isDrawerTool(tc));
+  const otherTools = allTools.filter(tc => !isDrawerTool(tc) && tc.result.type !== 'cite_moment');
+  const citeTools = allTools.filter(tc => tc.result.type === 'cite_moment');
+
+  return (
+    <>
+      {renderRichContent(aiText, onSeek, videoId)}
+      {citeTools.map((tc, i) => (
+        <ToolResultRenderer
+          key={`cite-${exchangeId}-${i}`}
+          toolCall={tc}
+          onSeek={onSeek}
+          onOpenVideo={onOpenVideo}
+        />
+      ))}
+      {otherTools.length > 0 && (
+        <div className="mt-2 space-y-1">
+          {otherTools.map((tc, i) => (
+            <ToolResultRenderer
+              key={`tool-${exchangeId}-${i}`}
+              toolCall={tc}
+              onSeek={onSeek}
+              onOpenVideo={onOpenVideo}
+            />
+          ))}
+        </div>
+      )}
+      {!suppressDrawerTools && drawerTools.length > 0 && (
+        <CompactToolStrip toolCalls={drawerTools} onSeek={onSeek} onOpenVideo={onOpenVideo} />
+      )}
+    </>
+  );
+}
+
 export function ExchangeMessage({ exchange, onSeek, videoId, onPlayMessage, isPlaying, isReadAloudLoading, onOpenVideo, skipEntrance, suppressDrawerTools }: ExchangeMessageProps) {
 
   return (
@@ -431,91 +533,16 @@ export function ExchangeMessage({ exchange, onSeek, videoId, onPlayMessage, isPl
 
           {/* Message content with interleaved tool cards */}
           <div className="text-[15px] text-slate-300 leading-relaxed whitespace-pre-wrap break-words">
-            {exchange.rawAiText ? (
-              // Segment-based rendering: tool cards at their natural position
-              (() => {
-                const segments = parseStreamToSegments(exchange.rawAiText!);
-                const drawerTools = segments
-                  .filter((s): s is { type: 'tool'; toolCall: ToolCallData } =>
-                    s.type === 'tool' && isDrawerTool(s.toolCall))
-                  .map(s => s.toolCall);
-
-                return (
-                  <>
-                    {segments.map((seg, i) => {
-                      if (seg.type === 'text') {
-                        if (!seg.content.trim()) return null;
-                        return <span key={`seg-${exchange.id}-${i}`}>{renderRichContent(seg.content, onSeek, videoId)}</span>;
-                      }
-                      // cite_moment: always inline
-                      if (seg.toolCall.result.type === 'cite_moment') {
-                        return (
-                          <ToolResultRenderer
-                            key={`tool-${exchange.id}-${i}`}
-                            toolCall={seg.toolCall}
-                            onSeek={onSeek}
-                            onOpenVideo={onOpenVideo}
-                          />
-                        );
-                      }
-                      // Drawer tools: skip if suppressed (shown in drawer), otherwise skip (shown in compact strip below)
-                      if (isDrawerTool(seg.toolCall)) return null;
-                      // Non-drawer, non-cite tools: render inline
-                      return (
-                        <div key={`tool-${exchange.id}-${i}`} className="my-2">
-                          <ToolResultRenderer
-                            toolCall={seg.toolCall}
-                            onSeek={onSeek}
-                            onOpenVideo={onOpenVideo}
-                          />
-                        </div>
-                      );
-                    })}
-                    {/* Compact strip for historical drawer tools (not the active drawer exchange) */}
-                    {!suppressDrawerTools && drawerTools.length > 0 && (
-                      <CompactToolStrip toolCalls={drawerTools} onSeek={onSeek} onOpenVideo={onOpenVideo} />
-                    )}
-                  </>
-                );
-              })()
-            ) : (
-              // Fallback: text then tool calls (backward compat for exchanges without rawAiText)
-              (() => {
-                const allTools = exchange.toolCalls || [];
-                const drawerTools = allTools.filter(tc => isDrawerTool(tc));
-                const otherTools = allTools.filter(tc => !isDrawerTool(tc) && tc.result.type !== 'cite_moment');
-                const citeTools = allTools.filter(tc => tc.result.type === 'cite_moment');
-
-                return (
-                  <>
-                    {renderRichContent(exchange.aiText, onSeek, videoId)}
-                    {citeTools.map((tc, i) => (
-                      <ToolResultRenderer
-                        key={`cite-${exchange.id}-${i}`}
-                        toolCall={tc}
-                        onSeek={onSeek}
-                        onOpenVideo={onOpenVideo}
-                      />
-                    ))}
-                    {otherTools.length > 0 && (
-                      <div className="mt-2 space-y-1">
-                        {otherTools.map((tc, i) => (
-                          <ToolResultRenderer
-                            key={`tool-${exchange.id}-${i}`}
-                            toolCall={tc}
-                            onSeek={onSeek}
-                            onOpenVideo={onOpenVideo}
-                          />
-                        ))}
-                      </div>
-                    )}
-                    {!suppressDrawerTools && drawerTools.length > 0 && (
-                      <CompactToolStrip toolCalls={drawerTools} onSeek={onSeek} onOpenVideo={onOpenVideo} />
-                    )}
-                  </>
-                );
-              })()
-            )}
+            <SegmentedContent
+              rawAiText={exchange.rawAiText}
+              aiText={exchange.aiText}
+              exchangeId={exchange.id}
+              toolCalls={exchange.toolCalls}
+              onSeek={onSeek}
+              videoId={videoId}
+              onOpenVideo={onOpenVideo}
+              suppressDrawerTools={suppressDrawerTools}
+            />
           </div>
 
           {/* Action buttons */}

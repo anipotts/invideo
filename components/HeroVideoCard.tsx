@@ -95,7 +95,7 @@ export function HeroVideoCard({
         e.stopPropagation();
         window.location.href = `/watch?v=${videoId}`;
       }}
-      className="hero-card flex flex-col relative rounded-lg overflow-hidden cursor-pointer border-2 border-white/[0.04] hover:border-chalk-accent/60 transition-colors duration-400 group h-full"
+      className="hero-card flex flex-col relative rounded-lg overflow-hidden cursor-pointer border-2 border-white/[0.04] hover:border-white/[0.25] transition-colors duration-400 group h-full"
       style={{
         pointerEvents: "auto",
         background: "rgba(255,255,255,0.02)",
@@ -105,7 +105,7 @@ export function HeroVideoCard({
       }}
     >
       {/* Metadata row — above thumbnail */}
-      <div className="flex items-center gap-2 px-2.5 py-1.5 border-b border-white/[0.06] group-hover:border-chalk-accent/60 transition-all ease-out duration-400">
+      <div className="flex items-center gap-2 px-2.5 py-1.5 border-b border-white/[0.06] group-hover:border-white/[0.20] transition-all ease-out duration-400">
         {CHANNEL_AVATARS[channelName] && !avatarError && (
           <img
             src={CHANNEL_AVATARS[channelName]}
@@ -156,21 +156,23 @@ export function HeroVideoCard({
             <div className="absolute inset-0 bg-gradient-to-t to-transparent transition-all duration-500 from-black/60 via-black/20 group-hover:from-black/85 group-hover:via-black/50" />
 
             <div className="relative px-2.5 pb-2">
-              {/* Question — stretched across card width, single line, left-aligned */}
-              <div className="w-full bg-white/[0.05] group-hover:bg-white/[0.08] border border-white/[0.08] group-hover:border-white/[0.15] rounded-lg px-2 py-1.5 transition-all duration-500">
-                <p className="text-[9px] leading-snug text-white/25 group-hover:text-white/80 font-medium line-clamp-1 group-hover:line-clamp-none text-left">
-                  {conversation.question}
-                </p>
+              {/* Question — right-aligned chat bubble */}
+              <div className="flex justify-end">
+                <div className="max-w-[85%] bg-white/[0.06] group-hover:bg-white/[0.12] rounded-2xl rounded-br-sm px-2.5 py-1.5 transition-all duration-500">
+                  <p className="text-[9px] leading-snug text-white/25 group-hover:text-white/80 font-medium line-clamp-1 group-hover:line-clamp-none">
+                    {conversation.question}
+                  </p>
+                </div>
               </div>
               {/* AI response — appears on hover, left-aligned */}
               <div className="mt-1.5 max-h-0 group-hover:max-h-28 opacity-0 group-hover:opacity-100 transition-all duration-500 overflow-hidden">
-                <div className="flex gap-1 justify-start items-center mb-1">
-                  <p className="text-[8px] text-chalk-accent/80 font-medium tracking-wide uppercase">
-                    {channelName}
-                  </p>
+                <div className="flex gap-1.5 items-center mb-1">
                   <span className="inline-flex items-center px-1.5 py-0.5 rounded-md font-mono text-[8px] bg-blue-500/20 text-blue-400">
                     {conversation.timestamp}
                   </span>
+                  <p className="text-[8px] text-slate-500 font-medium tracking-wide">
+                    {channelName}
+                  </p>
                 </div>
                 <p className="text-[9px] leading-snug text-slate-300/80 line-clamp-3">
                   {conversation.answer}{" "}
