@@ -175,7 +175,7 @@ export function HeroVideoCard({
                   </p>
                 </div>
                 <p className="text-[9px] leading-snug text-slate-300/80 line-clamp-3">
-                  {conversation.answer}{" "}
+                  {conversation.answer}
                 </p>
               </div>
             </div>

@@ -341,7 +341,7 @@ export function SearchResults({ results, isLoading, error, onRetry, loadingMore,
 
   if (isLoading) {
     return (
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 mt-6 p-6">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 mt-6">
         {Array.from({ length: 8 }).map((_, i) => (
           <div key={i} className="rounded-xl p-2">
             <div className="aspect-video bg-chalk-surface/20 rounded-lg animate-pulse" />
