@@ -48,6 +48,11 @@ export interface VoiceControls {
   error: string | null;
 }
 
+/**
+ * Slimmed-down props for InteractionOverlay.
+ * Voice, Learn, Explore, ReadAloud, and InVideo state are now provided via React contexts
+ * (see overlay-contexts.tsx), reducing this from 62 to ~20 core props.
+ */
 export interface InteractionOverlayProps {
   phase: import('@/hooks/useOverlayPhase').OverlayPhase;
   segments: TranscriptSegment[];
@@ -55,21 +60,8 @@ export interface InteractionOverlayProps {
   videoId: string;
   videoTitle?: string;
   transcriptSource?: TranscriptSource;
-  voiceId: string | null;
-  isVoiceCloning: boolean;
 
-  // Voice state
-  voiceState: VoiceState;
-  voiceTranscript: string;
-  voiceResponseText: string;
-  voiceError: string | null;
-  recordingDuration: number;
-  onStartRecording: () => void;
-  onStopRecording: () => void;
-  onCancelRecording: () => void;
-  onStopPlayback: () => void;
-
-  // Text state
+  // Text streaming state
   isTextStreaming: boolean;
   currentUserText: string;
   currentAiText: string;
@@ -79,6 +71,10 @@ export interface InteractionOverlayProps {
   onTextSubmit: (text: string) => Promise<void>;
   onStopTextStream: () => void;
 
+  // Voice transcript (from unified mode, for voice mode visual feedback)
+  voiceTranscript?: string;
+  voiceResponseText?: string;
+
   // Side panel
   onOpenVideo?: (
     videoId: string,
@@ -86,13 +82,6 @@ export interface InteractionOverlayProps {
     channelName: string,
     seekTo?: number,
   ) => void;
-
-  // Read aloud
-  autoReadAloud: boolean;
-  onToggleAutoReadAloud: (enabled: boolean) => void;
-  playingMessageId: string | null;
-  onPlayMessage: (id: string, text: string) => void;
-  isReadAloudLoading: boolean;
 
   // Unified state
   exchanges: UnifiedExchange[];
@@ -104,42 +93,9 @@ export interface InteractionOverlayProps {
   onInputFocus?: () => void;
   onInputBlur?: () => void;
 
-  // Learn mode
-  learnPhase: LearnModePhase;
-  learnSelectedAction: LearnAction | null;
-  learnQuiz: ParsedQuiz | null;
-  learnExplanation: ParsedExplanation | null;
-  learnIntroText: string;
-  learnResponseContent: string;
-  learnExportableContent: string | null;
-  learnAnswers: Map<number, string>;
-  learnScore: { correct: number; total: number };
-  learnThinking: string | null;
-  learnThinkingDuration: number | null;
-  learnLoading: boolean;
-  learnError: string | null;
-  learnOptions: LearnOption[];
-  learnOptionsLoading: boolean;
-  onOpenLearnMode: () => void;
-  onSelectAction: (action: LearnAction) => void;
-  onFocusInput?: () => void;
-  onSelectAnswer: (questionIndex: number, optionId: string) => void;
-  onNextBatch: () => void;
-  onStopLearnMode: () => void;
-
-  // Curriculum context (cross-video playlist)
+  // Curriculum
   curriculumContext?: string | null;
   curriculumVideoCount?: number;
-
-  // Explore mode (from unified mode hook)
-  exploreMode: boolean;
-  onToggleExploreMode: () => void;
-  onExploreSubmit: (text: string) => Promise<void>;
-  onStopExploreStream: () => void;
-  exploreError: string | null;
-  explorePills: string[];
-  isThinking: boolean;
-  thinkingDuration: number | null;
 
   // Storyboard data for timestamp hover cards
   storyboardLevels?: StoryboardLevel[];
@@ -148,9 +104,13 @@ export interface InteractionOverlayProps {
   interval?: IntervalSelection | null;
   onClearInterval?: () => void;
 
-  // Side panel open state (disables Knowledge Drawer when true)
-  sideOpen?: boolean;
-
   // Video paused state (for caret color)
   isPaused?: boolean;
+
+  // Settings controls (captions + speed) — rendered in InputStripContent gear dropdown
+  showCaptions?: boolean;
+  onToggleCaptions?: () => void;
+  playbackSpeed?: number;
+  onSetSpeed?: (speed: number) => void;
+  hasTranscript?: boolean;
 }

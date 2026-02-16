@@ -4,20 +4,22 @@ import React, {
   useState,
   useEffect,
   useCallback,
+  useMemo,
 } from "react";
-import type { UnifiedExchange } from "./ExchangeMessage";
-import type { LearnAction } from "@/hooks/useLearnMode";
+import { AnimatePresence, motion } from "framer-motion";
 import { storageKey } from "@/lib/brand";
-import type {
-  InteractionOverlayProps,
-  LearnState,
-  LearnHandlers,
-  VoiceControls,
-} from "./overlay-types";
+import type { InteractionOverlayProps } from "./overlay-types";
 import { OverlayBackdrop } from "./OverlayBackdrop";
 import { MessagePanel } from "./MessagePanel";
 import { InputStripContent } from "./InputStripContent";
 import { VideoTimeProvider } from "./VideoTimeContext";
+import {
+  useVoiceControls,
+  useLearnContext,
+  useExploreContext,
+  useReadAloudContext,
+  useInVideoContext,
+} from "./overlay-contexts";
 
 /* --- Main component: InteractionOverlay (thin shell) --- */
 
@@ -28,19 +30,6 @@ export function InteractionOverlay({
   videoId,
   videoTitle,
   transcriptSource,
-  voiceId,
-  isVoiceCloning,
-
-  // Voice
-  voiceState,
-  voiceTranscript,
-  voiceResponseText,
-  voiceError,
-  recordingDuration,
-  onStartRecording,
-  onStopRecording,
-  onCancelRecording,
-  onStopPlayback,
 
   // Text
   isTextStreaming,
@@ -53,12 +42,9 @@ export function InteractionOverlay({
   onStopTextStream,
   onOpenVideo,
 
-  // Read aloud
-  autoReadAloud,
-  onToggleAutoReadAloud,
-  playingMessageId,
-  onPlayMessage,
-  isReadAloudLoading,
+  // Voice transcript (from unified mode)
+  voiceTranscript,
+  voiceResponseText,
 
   // Unified
   exchanges,
@@ -69,53 +55,31 @@ export function InteractionOverlay({
   inputRef,
   onInputFocus,
   onInputBlur,
-
-  // Learn mode
-  learnPhase,
-  learnSelectedAction,
-  learnQuiz,
-  learnExplanation,
-  learnIntroText,
-  learnResponseContent,
-  learnExportableContent,
-  learnAnswers,
-  learnScore,
-  learnThinking,
-  learnThinkingDuration,
-  learnLoading,
-  learnError,
-  learnOptions,
-  learnOptionsLoading,
-  onOpenLearnMode,
-  onSelectAction,
-  onFocusInput,
-  onSelectAnswer,
-  onNextBatch,
-  onStopLearnMode,
   curriculumContext,
   curriculumVideoCount,
 
-  // Explore (from unified mode)
-  exploreMode,
-  onToggleExploreMode,
-  onExploreSubmit,
-  onStopExploreStream,
-  exploreError,
-  explorePills,
-  isThinking,
-  thinkingDuration,
-
-  sideOpen,
   storyboardLevels,
   interval,
   onClearInterval,
   isPaused,
+  showCaptions,
+  onToggleCaptions,
+  playbackSpeed,
+  onSetSpeed,
+  hasTranscript,
 }: InteractionOverlayProps) {
   const [input, setInput] = useState("");
   const [inputStripHeight, setInputStripHeight] = useState(72);
 
+  // Consume contexts
+  const voiceControls = useVoiceControls();
+  const { state: learnState, handlers: learnHandlers } = useLearnContext();
+  const { exploreMode, onSubmit: exploreSubmit, onToggle: exploreToggle, onStop: exploreStop, error: exploreError, isThinking: exploreIsThinking, thinkingDuration: exploreThinkingDuration } = useExploreContext();
+  const readAloud = useReadAloudContext();
+  const inVideo = useInVideoContext();
+
   const visible = phase === 'chatting';
-  const isTextMode = voiceState === "idle";
+  const isTextMode = voiceControls.state === "idle";
 
   // One-time cleanup of old localStorage keys
   useEffect(() => {
@@ -127,14 +91,13 @@ export function InteractionOverlay({
     }
   }, []);
 
-  const isLearnModeActive = learnPhase !== "idle";
+  const isLearnModeActive = learnState.phase !== "idle";
   const hasContent =
     exchanges.length > 0 ||
     isTextStreaming ||
     !!currentUserText ||
     !!currentAiText ||
-    !!voiceTranscript ||
-    !!voiceResponseText ||
+    voiceControls.state !== "idle" ||
     isLearnModeActive ||
     exploreMode;
 
@@ -144,29 +107,21 @@ export function InteractionOverlay({
     setInput("");
 
     if (isLearnModeActive) {
-      onStopLearnMode();
+      learnHandlers.onStop();
     }
 
     if (exploreMode) {
-      await onExploreSubmit(text);
+      await exploreSubmit(text);
     } else {
       await onTextSubmit(text);
     }
-  }, [input, exploreMode, isLearnModeActive, onStopLearnMode, onTextSubmit, onExploreSubmit]);
+  }, [input, exploreMode, exploreSubmit, isLearnModeActive, learnHandlers, onTextSubmit]);
 
   const handlePillSelect = useCallback(
     (option: string) => {
-      onExploreSubmit(option);
+      exploreSubmit(option);
     },
-    [onExploreSubmit],
-  );
-
-  const handleOptionCardClick = useCallback(
-    (action: LearnAction) => {
-      onOpenLearnMode();
-      setTimeout(() => onSelectAction(action), 0);
-    },
-    [onOpenLearnMode, onSelectAction],
+    [exploreSubmit],
   );
 
   const focusInput = useCallback(() => {
@@ -175,94 +130,65 @@ export function InteractionOverlay({
 
   const showExploreUI = exploreMode;
 
-  const learnState: LearnState = {
-    phase: learnPhase,
-    selectedAction: learnSelectedAction,
-    quiz: learnQuiz,
-    explanation: learnExplanation,
-    introText: learnIntroText,
-    responseContent: learnResponseContent,
-    exportableContent: learnExportableContent,
-    answers: learnAnswers,
-    score: learnScore,
-    thinking: learnThinking,
-    thinkingDuration: learnThinkingDuration,
-    isLoading: learnLoading,
-    error: learnError,
-    options: learnOptions,
-    optionsLoading: learnOptionsLoading,
-  };
-
-  const learnHandlers: LearnHandlers = {
-    onSelectAction,
-    onFocusInput,
-    onSelectAnswer,
-    onNextBatch,
-    onStop: onStopLearnMode,
-  };
-
-  const voiceControls: VoiceControls = {
-    state: voiceState,
-    onStart: onStartRecording,
-    onStop: onStopRecording,
-    onCancel: onCancelRecording,
-    onStopPlayback,
-    duration: recordingDuration,
-    error: voiceError,
-  };
-
   return (
     <>
-      {/* Message overlay — visible when chatting */}
-      {visible && (
-        <div
-          className="absolute inset-0 md:inset-auto md:top-0 md:left-0 md:right-0 md:aspect-video z-10 flex flex-col md:rounded-xl md:overflow-hidden transition-opacity duration-150"
-        >
-          <OverlayBackdrop visible={visible} onClick={onClose} />
-          <VideoTimeProvider currentTime={currentTime} isPaused={false}>
-            <MessagePanel
-              hasContent={hasContent}
-              expanded={visible}
-              exchanges={exchanges}
-              segments={segments}
-              videoId={videoId}
-              onSeek={onSeek}
-              onClose={onClose}
-              onOpenVideo={onOpenVideo}
-              isTextStreaming={isTextStreaming}
-              currentUserText={currentUserText}
-              currentAiText={currentAiText}
-              currentToolCalls={currentToolCalls}
-              currentRawAiText={currentRawAiText}
-              textError={textError}
-              voiceState={voiceState}
-              voiceTranscript={voiceTranscript}
-              voiceResponseText={voiceResponseText}
-              voiceError={voiceError}
-              showExploreUI={showExploreUI}
-              exploreMode={exploreMode}
-              exploreError={exploreError}
-              isThinking={isThinking}
-              thinkingDuration={thinkingDuration}
-              submitExploreMessage={onExploreSubmit}
-              playingMessageId={playingMessageId}
-              onPlayMessage={onPlayMessage}
-              isReadAloudLoading={isReadAloudLoading}
-              handlePillSelect={handlePillSelect}
-              focusInput={focusInput}
-              learnState={learnState}
-              learnHandlers={learnHandlers}
-              videoTitle={videoTitle}
-              tooltipSegments={segments}
-              storyboardLevels={storyboardLevels}
-              sideOpen={sideOpen}
-              isPaused={isPaused}
-            />
-          </VideoTimeProvider>
-          {/* Dynamic spacer for input strip on mobile */}
-          <div className="md:hidden flex-none" style={{ height: inputStripHeight }} />
-        </div>
-      )}
+      {/* Message overlay — visible when chatting, AnimatePresence for exit */}
+      <AnimatePresence>
+        {visible && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.2 }}
+            className="absolute inset-0 md:inset-auto md:top-0 md:left-0 md:right-0 md:aspect-video z-10 flex flex-col md:rounded-xl md:overflow-hidden"
+          >
+            <OverlayBackdrop visible={visible} onClick={onClose} />
+            <VideoTimeProvider currentTime={currentTime} isPaused={false}>
+              <MessagePanel
+                hasContent={hasContent}
+                expanded={visible}
+                exchanges={exchanges}
+                segments={segments}
+                videoId={videoId}
+                onSeek={onSeek}
+                onClose={onClose}
+                onOpenVideo={onOpenVideo}
+                isTextStreaming={isTextStreaming}
+                currentUserText={currentUserText}
+                currentAiText={currentAiText}
+                currentToolCalls={currentToolCalls}
+                currentRawAiText={currentRawAiText}
+                textError={textError}
+                voiceState={voiceControls.state}
+                voiceTranscript={voiceTranscript ?? ""}
+                voiceResponseText={voiceResponseText ?? ""}
+                voiceError={voiceControls.error}
+                showExploreUI={showExploreUI}
+                exploreMode={exploreMode}
+                exploreError={exploreError}
+                isThinking={exploreIsThinking}
+                thinkingDuration={exploreThinkingDuration}
+                submitExploreMessage={exploreSubmit}
+                playingMessageId={readAloud.playingMessageId}
+                onPlayMessage={readAloud.onPlay}
+                isReadAloudLoading={readAloud.isLoading}
+                handlePillSelect={handlePillSelect}
+                focusInput={focusInput}
+                learnState={learnState}
+                learnHandlers={learnHandlers}
+                videoTitle={videoTitle}
+                tooltipSegments={segments}
+                storyboardLevels={storyboardLevels}
+                inVideoEntry={inVideo.entry}
+                onCloseInVideo={inVideo.onClose}
+                isPaused={isPaused}
+              />
+            </VideoTimeProvider>
+            {/* Dynamic spacer for input strip on mobile */}
+            <div className="md:hidden flex-none" style={{ height: inputStripHeight }} />
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Input strip -- below video on desktop, bottom-pinned on mobile */}
       <InputStripContent
@@ -272,10 +198,10 @@ export function InteractionOverlay({
         handleSubmit={handleSubmit}
         isTextStreaming={isTextStreaming}
         exploreMode={exploreMode}
-        toggleExploreMode={onToggleExploreMode}
+        toggleExploreMode={exploreToggle}
         onStopStream={() => {
           if (exploreMode) {
-            onStopExploreStream();
+            exploreStop();
           } else {
             onStopTextStream();
           }
@@ -284,7 +210,7 @@ export function InteractionOverlay({
         onInputFocus={onInputFocus}
         onInputBlur={onInputBlur}
         voiceControls={voiceControls}
-        recordingDuration={recordingDuration}
+        recordingDuration={voiceControls.duration}
         exchanges={exchanges}
         onClearHistory={onClearHistory}
         onClose={onClose}
@@ -293,6 +219,11 @@ export function InteractionOverlay({
         onHeightChange={setInputStripHeight}
         interval={interval}
         onClearInterval={onClearInterval}
+        showCaptions={showCaptions}
+        onToggleCaptions={onToggleCaptions}
+        playbackSpeed={playbackSpeed}
+        onSetSpeed={onSetSpeed}
+        hasTranscript={hasTranscript}
       />
     </>
   );

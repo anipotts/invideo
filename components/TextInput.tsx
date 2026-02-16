@@ -18,6 +18,7 @@ interface TextInputProps {
   onBlur?: () => void;
   actions?: React.ReactNode;
   topBar?: React.ReactNode;
+  leftActions?: React.ReactNode;
 }
 
 const TIMESTAMP_RE = /\[(\d{1,2}:\d{2}(?::\d{2})?)\]/g;
@@ -137,6 +138,7 @@ export function TextInput({
   onBlur,
   actions,
   topBar,
+  leftActions,
 }: TextInputProps) {
   const internalRef = useRef<HTMLDivElement>(null);
   const lastSyncedRef = useRef(value);
@@ -222,8 +224,17 @@ export function TextInput({
   const handlePaste = useCallback((e: React.ClipboardEvent) => {
     e.preventDefault();
     const text = e.clipboardData.getData('text/plain').replace(/\n/g, ' ');
-    document.execCommand('insertText', false, text);
-  }, []);
+    const sel = window.getSelection();
+    if (sel && sel.rangeCount > 0) {
+      const range = sel.getRangeAt(0);
+      range.deleteContents();
+      range.insertNode(document.createTextNode(text));
+      range.collapse(false);
+      sel.removeAllRanges();
+      sel.addRange(range);
+      handleInput();
+    }
+  }, [handleInput]);
 
   const handleCompositionStart = useCallback(() => {
     isComposingRef.current = true;
@@ -269,7 +280,7 @@ export function TextInput({
         />
       </div>
       <div className="flex items-center justify-between px-1.5 pb-1.5">
-        <div>
+        <div className="flex items-center gap-1">
           {onToggleExplore && (
             <button
               type="button"
@@ -286,6 +297,7 @@ export function TextInput({
               Explore
             </button>
           )}
+          {leftActions}
         </div>
         <div className="flex items-center gap-1">
           {actions}

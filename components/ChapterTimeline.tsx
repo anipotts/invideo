@@ -230,18 +230,7 @@ export function ChapterTimeline({
         aria-valuenow={currentTime}
         aria-label="Video progress"
       >
-        {/* Chapter segment dividers */}
-        {hasChapters && chapters.map((ch, i) => {
-          if (i === 0) return null;
-          const left = (ch.offset / duration) * 100;
-          return (
-            <div
-              key={`div-${i}`}
-              className="absolute top-0 h-full w-[2px] bg-chalk-bg/80 z-[2]"
-              style={{ left: `${left}%` }}
-            />
-          );
-        })}
+        {/* Chapter segment dividers — hidden for cleaner look */}
 
         {/* Progress bar */}
         <div
@@ -271,17 +260,7 @@ export function ChapterTimeline({
           style={{ left: `${progressFraction * 100}%`, marginLeft: '-5px' }}
         />
 
-        {/* Key moment markers — subtle dots, no numbers */}
-        {sortedMoments && sortedMoments.length > 0 && sortedMoments.map((m, i) => {
-          const pct = Math.min(m.timestamp_seconds / duration, 1) * 100;
-          return (
-            <div
-              key={i}
-              className="absolute top-1/2 -translate-y-1/2 w-[5px] h-[5px] -ml-[2.5px] rounded-full bg-white/25 z-[3] pointer-events-none"
-              style={{ left: `${pct}%` }}
-            />
-          );
-        })}
+        {/* Key moment markers — hidden for cleaner look */}
       </div>
 
       {/* Hover timestamp tooltip */}

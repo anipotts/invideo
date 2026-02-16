@@ -20,6 +20,25 @@ module.exports = {
           error: '#ef4444',
         },
       },
+      backgroundColor: {
+        'elevated-1': 'rgba(255,255,255,0.04)',
+        'elevated-2': 'rgba(255,255,255,0.08)',
+        'elevated-3': 'rgba(255,255,255,0.12)',
+      },
+      borderColor: {
+        'subtle': 'rgba(255,255,255,0.06)',
+        'hover': 'rgba(255,255,255,0.12)',
+      },
+      fontSize: {
+        'micro': ['10px', { lineHeight: '14px' }],
+        'caption': ['12px', { lineHeight: '16px' }],
+        'body-sm': ['14px', { lineHeight: '20px' }],
+        'body': ['16px', { lineHeight: '24px' }],
+      },
+      transitionDuration: {
+        'micro': '150ms',
+        'layout': '250ms',
+      },
       fontFamily: {
         sans: ['Inter', 'system-ui', 'sans-serif'],
         mono: ['JetBrains Mono', 'monospace'],

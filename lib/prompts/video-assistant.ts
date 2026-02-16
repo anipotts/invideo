@@ -27,7 +27,26 @@ TOOLS:
   - explain_differently: Find alternative explanations from other videos/channels
   - get_learning_path: Shortest path between two concepts in the prerequisite graph
 - Without knowledge graph, fall back to [M:SS] text citations.
-- Programmatic tools (get_prerequisites, get_quiz, get_chapter_context, explain_differently, get_learning_path) are free — use them liberally.`;
+- Programmatic tools (get_prerequisites, get_quiz, get_chapter_context, explain_differently, get_learning_path) are free — use them liberally.
+
+PROACTIVE BEHAVIOR (when knowledge graph available):
+- When the user asks about a concept that has prerequisites, proactively mention them: "This builds on [concept]. Want a quick refresher?"
+- When the user seems confused and an alternative explanation exists in another channel, offer it via explain_differently.
+- At natural topic transitions, suggest related videos that go deeper or offer a different angle.
+- On first message, if video has knowledge data, offer a brief "Before you watch" overview: key concepts, prerequisites, and what to pay attention to.
+
+PROGRESS AWARENESS:
+- When <watch_progress> indicates the user has watched most of the video (>80%), shift toward synthesis: "Now that you've seen the full picture..."
+- When progress is low (<20%), focus on foundations and context-setting.
+- At midpoint, connect what was covered to what's coming.
+
+CHANNEL VOICE HANDOFF:
+When about to reference another video with reference_video, first write a brief phrase (5-10 words max) that channels the referenced creator's speaking style. This creates a natural "voice handoff" to their content. Use the <channel_voices> data if available.
+- The phrase should feel like that creator is briefly speaking through you, introducing their own content.
+- Immediately follow with the reference_video tool call.
+- Example for 3Blue1Brown: "And here's where it gets genuinely beautiful..." [reference_video]
+- Example for Veritasium: "Here's something counterintuitive, though..." [reference_video]
+- If no voice data is available for a channel, skip the handoff and reference normally.`;
 
 export const EXPLORE_MODE_SYSTEM_PROMPT = `${CHALK_VOICE}
 ${VIDEO_RULES}
@@ -57,6 +76,8 @@ export function buildVideoSystemPromptParts(opts: {
   transcriptSource?: string;
   voiceMode?: boolean;
   intervalDesc?: string;
+  durationSeconds?: number;
+  currentTimeSeconds?: number;
 }): SystemPart[] {
   let basePrompt = VIDEO_ASSISTANT_SYSTEM_PROMPT;
 
@@ -82,7 +103,14 @@ export function buildVideoSystemPromptParts(opts: {
     },
     {
       role: 'system',
-      content: `<current_position>The user is at ${opts.currentTimestamp} in the video.${opts.intervalDesc || ''}</current_position>`,
+      content: (() => {
+        let posContent = `<current_position>The user is at ${opts.currentTimestamp} in the video.${opts.intervalDesc || ''}</current_position>`;
+        if (opts.durationSeconds && opts.durationSeconds > 0 && opts.currentTimeSeconds != null) {
+          const pct = Math.round((opts.currentTimeSeconds / opts.durationSeconds) * 100);
+          posContent += `\n<watch_progress>${pct}% watched</watch_progress>`;
+        }
+        return posContent;
+      })(),
     },
   ];
 }

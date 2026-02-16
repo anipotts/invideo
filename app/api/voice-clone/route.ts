@@ -1,21 +1,24 @@
-import { cloneVoice, isElevenLabsAvailable } from '@/lib/tts/elevenlabs';
+import { cloneVoice, findVoiceByName, isElevenLabsAvailable } from '@/lib/tts/elevenlabs';
 import { downloadAudioHTTP, downloadAudioWebScrape } from '@/lib/transcript';
-import { createClient } from '@supabase/supabase-js';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 120;
 
-function getSupabaseClient() {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-  const key = serviceKey || anonKey;
-  if (url && key) return createClient(url, key);
-  return null;
-}
-
 function sanitizeChannelName(name: string): string {
   return name.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 60);
+}
+
+// In-memory cache — survives across requests within the same server instance
+const MAX_VOICE_CACHE = 200;
+const voiceCache = new Map<string, { voiceId: string; name: string }>();
+
+function cacheVoice(key: string, value: { voiceId: string; name: string }) {
+  if (voiceCache.size >= MAX_VOICE_CACHE) {
+    // Evict oldest entry (first inserted)
+    const firstKey = voiceCache.keys().next().value;
+    if (firstKey) voiceCache.delete(firstKey);
+  }
+  cacheVoice(key, value);
 }
 
 export async function POST(req: Request) {
@@ -42,69 +45,34 @@ export async function POST(req: Request) {
     ? channelName.trim().slice(0, 200)
     : null;
 
-  // Check Supabase cache first — channel-level then video-level fallback
-  const supabase = getSupabaseClient();
-  if (supabase) {
-    try {
-      // Try channel-level cache first
-      if (safeChannelName) {
-        const { data } = await supabase
-          .from('voice_clones')
-          .select('voice_id, voice_name')
-          .eq('channel_name', safeChannelName)
-          .single();
+  const voiceName = safeChannelName
+    ? `chalk-${sanitizeChannelName(safeChannelName)}`
+    : `chalk-${videoId}`;
 
-        if (data?.voice_id) {
-          supabase
-            .from('voice_clones')
-            .update({ last_used_at: new Date().toISOString() })
-            .eq('channel_name', safeChannelName)
-            .then(() => {});
+  // 1. Check in-memory cache (instant)
+  const cacheKey = safeChannelName || videoId;
+  const cached = voiceCache.get(cacheKey) || voiceCache.get(videoId);
+  if (cached) {
+    return Response.json({ voiceId: cached.voiceId, name: cached.name, cached: true });
+  }
 
-          return Response.json({
-            voiceId: data.voice_id,
-            name: data.voice_name,
-            cached: true,
-          });
-        }
-      }
+  // 2. Check ElevenLabs for existing voice FIRST (fast — skips YouTube download)
+  const namesToTry = [voiceName];
+  const videoOnlyName = `chalk-${videoId}`;
+  if (voiceName !== videoOnlyName) namesToTry.push(videoOnlyName);
 
-      // Fallback: video-level cache (legacy)
-      const { data } = await supabase
-        .from('voice_clones')
-        .select('voice_id, voice_name')
-        .eq('video_id', videoId)
-        .single();
-
-      if (data?.voice_id) {
-        // Upgrade legacy entry with channel_name if available
-        if (safeChannelName) {
-          supabase
-            .from('voice_clones')
-            .update({ channel_name: safeChannelName, last_used_at: new Date().toISOString() })
-            .eq('video_id', videoId)
-            .then(() => {});
-        } else {
-          supabase
-            .from('voice_clones')
-            .update({ last_used_at: new Date().toISOString() })
-            .eq('video_id', videoId)
-            .then(() => {});
-        }
-
-        return Response.json({
-          voiceId: data.voice_id,
-          name: data.voice_name,
-          cached: true,
-        });
-      }
-    } catch {
-      // Cache miss — continue to clone
+  for (const name of namesToTry) {
+    const existingId = await findVoiceByName(name).catch(() => null);
+    if (existingId) {
+      // Cache for future requests
+      cacheVoice(cacheKey, { voiceId: existingId, name });
+      if (cacheKey !== videoId) cacheVoice(videoId, { voiceId: existingId, name });
+      return Response.json({ voiceId: existingId, name, cached: true });
     }
   }
 
-  // Download audio from YouTube (try innertube first, then web scrape)
-  let audioBuffer: Buffer;
+  // 3. No existing voice — download audio and create new clone
+  let audioBuffer: Buffer | null = null;
   try {
     audioBuffer = await downloadAudioHTTP(videoId);
   } catch (err) {
@@ -113,48 +81,31 @@ export async function POST(req: Request) {
       audioBuffer = await downloadAudioWebScrape(videoId);
     } catch (err2) {
       console.error('[voice-clone] Web scrape audio also failed:', err2 instanceof Error ? err2.message : err2);
-      return Response.json(
-        { error: 'Could not extract audio from video' },
-        { status: 404 },
-      );
     }
   }
 
-  // Clone the voice via ElevenLabs
-  const voiceName = safeChannelName
-    ? `chalk-${sanitizeChannelName(safeChannelName)}`
-    : `chalk-${videoId}`;
-  let voiceId: string;
-  try {
-    voiceId = await cloneVoice(audioBuffer, voiceName);
-  } catch (err) {
-    console.error('[voice-clone] Clone failed:', err instanceof Error ? err.message : err);
+  if (!audioBuffer) {
     return Response.json(
-      { error: 'Voice cloning failed' },
-      { status: 500 },
+      { error: 'No existing voice clone found and audio download failed' },
+      { status: 404 },
     );
   }
 
-  // Cache in Supabase (fire-and-forget)
-  if (supabase) {
-    supabase
-      .from('voice_clones')
-      .upsert({
-        video_id: videoId,
-        voice_id: voiceId,
-        voice_name: voiceName,
-        channel_name: safeChannelName,
-        created_at: new Date().toISOString(),
-        last_used_at: new Date().toISOString(),
-      })
-      .then(({ error }) => {
-        if (error) console.error('[voice-clone] Supabase cache error:', error.message);
-      });
+  const description = safeChannelName
+    ? `Cloned voice of ${safeChannelName} from YouTube educational content. Clear, articulate speaking voice.`
+    : `Cloned voice from YouTube video ${videoId}`;
+
+  let voiceId: string;
+  try {
+    voiceId = await cloneVoice(audioBuffer, voiceName, description);
+  } catch (err) {
+    console.error('[voice-clone] Clone failed:', err instanceof Error ? err.message : err);
+    return Response.json({ error: 'Voice cloning failed' }, { status: 500 });
   }
 
-  return Response.json({
-    voiceId,
-    name: voiceName,
-    cached: false,
-  });
+  // Cache for future requests
+  cacheVoice(cacheKey, { voiceId, name: voiceName });
+  if (cacheKey !== videoId) cacheVoice(videoId, { voiceId, name: voiceName });
+
+  return Response.json({ voiceId, name: voiceName, cached: false });
 }

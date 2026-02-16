@@ -5,6 +5,7 @@ import React, {
   useRef,
   useEffect,
   useCallback,
+  useMemo,
 } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 // motion still used for TalkingTimer, explore pills entrance, error msgs, tooltip
@@ -20,6 +21,11 @@ const KnowledgeDrawer = dynamic(
   () => import("./KnowledgeDrawer").then((m) => m.KnowledgeDrawer),
   { ssr: false }
 );
+import type { DrawerExchangeGroup } from "./KnowledgeDrawer";
+const InVideoPanel = dynamic(
+  () => import("./InVideoPanel").then((m) => m.InVideoPanel),
+  { ssr: false }
+);
 import { ExplorePills } from "./ExplorePills";
 import { LearnModeQuiz } from "./LearnModeQuiz";
 import type { VoiceState } from "@/hooks/useVoiceMode";
@@ -27,6 +33,7 @@ import type { TranscriptSegment } from "@/lib/video-utils";
 import { getStoryboardFrame, type StoryboardLevel } from "@/lib/storyboard";
 import { createPortal } from "react-dom";
 import type { LearnState, LearnHandlers } from "./overlay-types";
+import type { SideVideoEntry } from "./SideVideoPanel";
 
 /* --- Learn mode error boundary --- */
 
@@ -123,10 +130,15 @@ function TimestampTooltip({
   onSeek: (seconds: number) => void;
   onClose: () => void;
 }) {
-  const sorted = [...segments].sort(
-    (a, b) => Math.abs(a.offset - seconds) - Math.abs(b.offset - seconds),
-  );
-  const nearby = sorted.slice(0, 3).sort((a, b) => a.offset - b.offset);
+  // Binary search for nearest segments (O(log n) vs O(n log n) sort)
+  let lo = 0, hi = segments.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (segments[mid].offset < seconds) lo = mid + 1;
+    else hi = mid - 1;
+  }
+  const start = Math.max(0, lo - 1);
+  const nearby = segments.slice(start, start + 3);
 
   if (nearby.length === 0) return null;
 
@@ -275,8 +287,9 @@ export interface MessagePanelProps {
   tooltipSegments: TranscriptSegment[];
   storyboardLevels?: StoryboardLevel[];
 
-  // Side panel state (disables Knowledge Drawer when true)
-  sideOpen?: boolean;
+  // InVideo panel (reference video inside overlay)
+  inVideoEntry?: SideVideoEntry | null;
+  onCloseInVideo?: () => void;
 
   // Video paused state (for caret color)
   isPaused?: boolean;
@@ -320,7 +333,8 @@ export function MessagePanel({
   videoTitle,
   tooltipSegments,
   storyboardLevels,
-  sideOpen,
+  inVideoEntry,
+  onCloseInVideo,
 }: MessagePanelProps) {
   const [canScrollDown, setCanScrollDown] = useState(false);
   const [drawerDismissed, setDrawerDismissed] = useState(false);
@@ -351,24 +365,41 @@ export function MessagePanel({
   }, [isTextStreaming]);
 
   // === Knowledge Drawer state derivation ===
-  // Filter non-cite tools from streaming state
-  const streamingDrawerCalls = (currentToolCalls ?? []).filter(tc => isDrawerTool(tc));
+  // Accumulate ALL drawer-worthy tool calls from ALL exchanges, grouped by exchange
+  const exchangeGroups: DrawerExchangeGroup[] = useMemo(() => {
+    const groups: DrawerExchangeGroup[] = [];
+    for (const ex of exchanges) {
+      const drawerTools = ex.toolCalls?.filter(tc => isDrawerTool(tc)) ?? [];
+      if (drawerTools.length > 0) {
+        groups.push({
+          exchangeId: ex.id,
+          userText: ex.userText,
+          toolCalls: drawerTools,
+        });
+      }
+    }
+    return groups;
+  }, [exchanges]);
 
-  // Check if the most recent completed exchange has drawer-worthy tools
-  const lastExchange = exchanges[exchanges.length - 1];
-  const lastExchangeDrawerCalls = !isTextStreaming && lastExchange?.toolCalls
-    ? lastExchange.toolCalls.filter(tc => isDrawerTool(tc))
-    : [];
+  // Filter drawer tools from current streaming state
+  const streamingDrawerCalls = useMemo(
+    () => (currentToolCalls ?? []).filter(tc => isDrawerTool(tc)),
+    [currentToolCalls],
+  );
 
-  // Drawer is open when:
-  // 1. Current stream has drawer-worthy tools, OR
-  // 2. Most recent completed exchange has drawer-worthy tools AND no new stream started
-  // Disabled: on mobile (handled by CSS), when side panel is open, or when user typed a new message
-  const drawerCalls = streamingDrawerCalls.length > 0
-    ? streamingDrawerCalls
-    : lastExchangeDrawerCalls;
+  const totalDrawerCount = useMemo(
+    () => exchangeGroups.reduce((s, g) => s + g.toolCalls.length, 0) + streamingDrawerCalls.length,
+    [exchangeGroups, streamingDrawerCalls],
+  );
 
-  const isDrawerOpen = drawerCalls.length > 0 && !currentUserText && !sideOpen && !drawerDismissed;
+  // Memoize streaming segment parsing to avoid O(n^2) re-parse on each char
+  const streamSegments = useMemo(
+    () => currentRawAiText ? parseStreamToSegments(currentRawAiText) : [],
+    [currentRawAiText],
+  );
+
+  // Drawer is open when there are any accumulated tools or streaming tools
+  const isDrawerOpen = totalDrawerCount > 0 && !currentUserText && !drawerDismissed;
 
   // Auto-scroll
   const scrollToBottom = useCallback((smooth = false) => {
@@ -380,9 +411,11 @@ export function MessagePanel({
     }
   }, []);
 
-  // Scroll to bottom on new content
+  // Scroll to bottom on new content (rAF to avoid race with DOM paint)
   useEffect(() => {
-    if (!canScrollDown) scrollToBottom();
+    if (!canScrollDown) {
+      requestAnimationFrame(() => scrollToBottom());
+    }
   }, [
     exchanges,
     currentAiText,
@@ -464,11 +497,12 @@ export function MessagePanel({
           <div className="flex-1 w-full min-h-0 flex flex-row pointer-events-auto" data-message-panel>
             {/* Knowledge Drawer — desktop only, LEFT side, disabled when side panel is open */}
             <div className={`hidden md:flex flex-none overflow-hidden transition-[width,opacity] duration-300 ease-out ${
-              isDrawerOpen ? 'w-[320px] lg:w-[360px] opacity-100 border-r border-white/[0.06]' : 'w-0 opacity-0'
+              isDrawerOpen ? 'w-[320px] lg:w-[340px] opacity-100 border-r border-white/[0.06]' : 'w-0 opacity-0'
             }`}>
-              {drawerCalls.length > 0 && (
+              {totalDrawerCount > 0 && (
                 <KnowledgeDrawer
-                  toolCalls={drawerCalls}
+                  exchangeGroups={exchangeGroups}
+                  streamingCalls={streamingDrawerCalls}
                   isStreaming={isTextStreaming && streamingDrawerCalls.length > 0}
                   onSeek={handleTimestampSeek}
                   onOpenVideo={onOpenVideo}
@@ -478,7 +512,7 @@ export function MessagePanel({
             </div>
 
             {/* Drawer reopen toggle — shown when drawer has content but is dismissed */}
-            {drawerDismissed && drawerCalls.length > 0 && !sideOpen && (
+            {drawerDismissed && totalDrawerCount > 0 && (
               <button
                 onClick={() => setDrawerDismissed(false)}
                 className="hidden md:flex flex-none items-center justify-center w-8 border-r border-white/[0.06] text-slate-500 hover:text-slate-300 hover:bg-white/[0.04] transition-colors"
@@ -531,12 +565,9 @@ export function MessagePanel({
                   }
                 }
 
-                // Suppress drawer tools for the active drawer exchange (last completed exchange with drawer tools)
-                const isActiveDrawerExchange =
-                  isDrawerOpen &&
-                  !isTextStreaming &&
-                  i === exchanges.length - 1 &&
-                  lastExchangeDrawerCalls.length > 0;
+                // Suppress drawer tools inline when the drawer is open (they render in the drawer instead)
+                const hasDrawerTools = exchange.toolCalls?.some(tc => isDrawerTool(tc)) ?? false;
+                const isActiveDrawerExchange = isDrawerOpen && hasDrawerTools;
 
                 return (
                   <React.Fragment key={exchange.id}>
@@ -585,7 +616,7 @@ export function MessagePanel({
                           {!showExploreUI && currentRawAiText && currentToolCalls && currentToolCalls.length > 0 ? (
                             // Segment-based rendering: route drawer tools to KnowledgeDrawer
                             <>
-                              {parseStreamToSegments(currentRawAiText).map((seg, i) => {
+                              {streamSegments.map((seg, i) => {
                                 if (seg.type === 'text') {
                                   if (!seg.content.trim()) return null;
                                   return <span key={`stream-seg-${i}`}>{renderRichContent(seg.content, handleTimestampSeek, videoId)}</span>;
@@ -746,6 +777,19 @@ export function MessagePanel({
                   </svg>
                 </button>
               </div>
+            </div>
+
+            {/* InVideo Panel — desktop only, RIGHT side, mirrors drawer CSS pattern */}
+            <div className={`hidden md:flex flex-none overflow-hidden transition-[width,opacity] duration-300 ease-out ${
+              inVideoEntry ? 'w-[320px] lg:w-[340px] opacity-100 border-l border-white/[0.06]' : 'w-0 opacity-0'
+            }`}>
+              {inVideoEntry && (
+                <InVideoPanel
+                  entry={inVideoEntry}
+                  onClose={onCloseInVideo ?? (() => {})}
+                  onOpenVideo={onOpenVideo}
+                />
+              )}
             </div>
           </div>
         )}

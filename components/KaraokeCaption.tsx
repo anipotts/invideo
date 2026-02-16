@@ -197,6 +197,9 @@ export function KaraokeCaption({ segments, currentTime }: KaraokeCaptionProps) {
       }
     }
 
+    // Before the first word is spoken, hide captions entirely
+    if (!fading && activeWordIndex < 0) return null;
+
     // Split into sub-phrases
     const phrases = splitIntoSubPhrases(words);
 
@@ -205,9 +208,6 @@ export function KaraokeCaption({ segments, currentTime }: KaraokeCaptionProps) {
     if (fading) {
       // When fading (gap bridge), show the last sub-phrase
       activePhraseIdx = phrases.length - 1;
-    } else if (activeWordIndex < 0) {
-      // Before first word, show the first sub-phrase
-      activePhraseIdx = 0;
     } else {
       for (let i = 0; i < phrases.length; i++) {
         if (activeWordIndex >= phrases[i].startIdx && activeWordIndex < phrases[i].endIdx) {
@@ -243,7 +243,7 @@ export function KaraokeCaption({ segments, currentTime }: KaraokeCaptionProps) {
           if (fading) {
             className += 'text-slate-500/50';
           } else if (isActive) {
-            className += 'karaoke-active bg-chalk-accent/90 text-white px-1 rounded';
+            className += 'karaoke-active bg-white/90 text-chalk-bg px-1 rounded';
           } else if (isSpoken) {
             className += 'text-slate-400';
           } else {

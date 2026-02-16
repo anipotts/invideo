@@ -15,7 +15,7 @@ interface TranscriptPanelProps {
   source?: TranscriptSource | null;
   progress?: number;
   error?: string;
-  variant?: 'sidebar' | 'inline' | 'mobile';
+  variant?: 'sidebar' | 'inline' | 'mobile' | 'invideo';
   onClose?: () => void;
   onRetry?: () => void;
   onAskAbout?: (timestamp: number, text: string) => void;
@@ -35,6 +35,7 @@ export function TranscriptPanel({
   error,
   variant = 'sidebar',
   onClose,
+  onRetry,
   onAskAbout,
   queueProgress,
 }: TranscriptPanelProps) {
@@ -100,47 +101,26 @@ export function TranscriptPanel({
   }, []);
 
   const isLoading = status === 'connecting' || status === 'extracting' || status === 'queued' || status === 'transcribing';
-  const isSidebar = variant === 'sidebar';
+  const isSidebar = variant === 'sidebar' || variant === 'invideo';
   const isMobile = variant === 'mobile';
+  const isInVideo = variant === 'invideo';
 
   return (
-    <div className={`flex flex-col ${isSidebar || isMobile ? 'h-full' : 'max-h-[400px]'} bg-chalk-bg`}>
-      {/* Header — minimal, hidden on mobile */}
-      {!isMobile && (
-        <div className="flex-none flex items-center justify-between px-4 py-2 border-b border-chalk-border/30">
-          <div className="flex items-center gap-2">
-            {source && (
-              <span className={`text-[9px] px-1.5 py-0.5 rounded-lg border uppercase tracking-wider ${
-                source === 'groq-whisper' || source === 'whisperx' || source === 'deepgram'
-                  ? 'bg-amber-500/10 border-amber-500/30 text-amber-400'
-                  : 'bg-chalk-surface/60 border-chalk-border/30 text-slate-500'
-              }`}>
-                {source}
-              </span>
-            )}
-          </div>
-          {onClose && (
-            <button
-              onClick={onClose}
-              className="w-6 h-6 rounded-md flex items-center justify-center text-slate-500 hover:text-slate-300 hover:bg-white/[0.06] transition-colors"
-              title="Close transcript"
-              aria-label="Close transcript"
-            >
-              <XCircle size={14} />
-            </button>
-          )}
-        </div>
-      )}
-
-      {/* Search / Loading / Error — unified row, desktop only */}
-      {!isMobile && (
-        <div className="flex-none px-3 py-2 border-b border-chalk-border/20">
+    <div className={`flex flex-col ${isSidebar || isMobile ? 'h-full' : 'max-h-[400px]'} ${isInVideo ? '' : 'bg-chalk-bg'}`}>
+      {/* Header — search + close in one row, hidden on mobile and invideo */}
+      {!isMobile && !isInVideo && (
+        <div className="flex-none flex items-center gap-2 px-3 py-2 border-b border-chalk-border/20">
           {status === 'error' ? (
-            <div className="w-full px-3 py-1.5 rounded-lg bg-red-500/[0.06] border border-red-500/20 text-xs text-slate-500">
-              Transcript couldn&apos;t be loaded, sorry.
+            <div className="flex-1 px-3 py-1.5 rounded-lg bg-red-500/[0.06] border border-red-500/20 text-xs text-slate-500 flex items-center justify-between">
+              <span>Transcript couldn&apos;t be loaded, sorry.</span>
+              {onRetry && (
+                <button onClick={onRetry} className="ml-2 text-chalk-accent hover:underline flex-shrink-0">
+                  Retry
+                </button>
+              )}
             </div>
           ) : isLoading ? (
-            <div className="relative w-full">
+            <div className="relative flex-1">
               <div className="w-full px-3 py-1.5 rounded-lg bg-chalk-surface/40 border border-chalk-border/20 text-xs text-slate-500 flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <div className="w-3 h-3 border border-chalk-accent/40 border-t-chalk-accent rounded-full animate-spin flex-shrink-0" />
@@ -152,7 +132,6 @@ export function TranscriptPanel({
                   </span>
                 )}
               </div>
-              {/* Slim progress bar at bottom edge of input */}
               <div className="absolute bottom-0 left-3 right-3 h-[2px] rounded-full bg-white/[0.04] overflow-hidden">
                 {(progress ?? 0) > 0 && (progress ?? 0) < 100 ? (
                   <div
@@ -172,8 +151,18 @@ export function TranscriptPanel({
               onChange={(e) => setSearch(e.target.value)}
               placeholder="Search transcript... (/)"
               aria-label="Search transcript"
-              className="w-full px-3 py-1.5 rounded-lg bg-chalk-surface/40 border border-chalk-border/20 text-xs text-chalk-text placeholder:text-slate-600 focus:outline-none focus:ring-1 focus:ring-chalk-accent/40 transition-colors"
+              className="flex-1 px-3 py-1.5 rounded-lg bg-chalk-surface/40 border border-chalk-border/20 text-xs text-chalk-text placeholder:text-slate-600 focus:outline-none focus:ring-1 focus:ring-chalk-accent/40 transition-colors"
             />
+          )}
+          {onClose && (
+            <button
+              onClick={onClose}
+              className="w-7 h-7 rounded-md flex items-center justify-center text-slate-500 hover:text-slate-300 hover:bg-white/[0.06] transition-colors flex-shrink-0"
+              title="Close transcript"
+              aria-label="Close transcript"
+            >
+              <XCircle size={14} />
+            </button>
           )}
         </div>
       )}
@@ -182,8 +171,13 @@ export function TranscriptPanel({
       {isMobile && (isLoading || status === 'error') && (
         <div className="flex-none px-3 py-2">
           {status === 'error' ? (
-            <div className="text-xs text-slate-500">
-              Transcript couldn&apos;t be loaded, sorry.
+            <div className="text-xs text-slate-500 flex items-center gap-2">
+              <span>Transcript couldn&apos;t be loaded, sorry.</span>
+              {onRetry && (
+                <button onClick={onRetry} className="text-chalk-accent hover:underline">
+                  Retry
+                </button>
+              )}
             </div>
           ) : (
             <div className="flex items-center gap-2">
@@ -241,27 +235,34 @@ export function TranscriptPanel({
                     onSeek(seg.offset);
                   }
                 }}
-                className={`group flex gap-3 cursor-pointer transition-colors ${
-                  isMobile ? 'px-3 py-1 active:scale-[0.99]' : 'px-4 py-1.5'
-                } ${
-                  isActive
-                    ? 'bg-chalk-accent/[0.08] border-l-2 border-l-chalk-accent'
-                    : 'border-l-2 border-l-transparent hover:bg-white/[0.03]'
-                }`}
+                className={isInVideo
+                  ? `group flex gap-2 cursor-pointer transition-all duration-150 mx-2 my-0.5 px-2.5 py-1.5 rounded-lg ${
+                    isActive
+                      ? 'bg-white/[0.12] border border-chalk-accent/30'
+                      : 'bg-white/[0.06] border border-white/[0.08] hover:bg-white/[0.10] hover:border-white/[0.14]'
+                  }`
+                  : `group flex gap-3 cursor-pointer transition-colors ${
+                    isMobile ? 'px-3 py-1 active:scale-[0.99]' : 'px-4 py-1.5'
+                  } ${
+                    isActive
+                      ? 'bg-chalk-accent/[0.08] border-l-2 border-l-chalk-accent'
+                      : 'border-l-2 border-l-transparent hover:bg-white/[0.03]'
+                  }`
+                }
               >
                 <span className={`shrink-0 text-[10px] font-mono pt-0.5 ${
-                  isActive ? 'text-chalk-accent' : 'text-slate-600'
+                  isActive ? 'text-chalk-accent' : isInVideo ? 'text-slate-500' : 'text-slate-600'
                 }`}>
                   {formatTimestamp(seg.offset)}
                 </span>
                 <span className={`${
-                  isMobile ? 'text-[11px] leading-snug' : 'text-[12px] leading-relaxed'
+                  isMobile ? 'text-[11px] leading-snug' : isInVideo ? 'text-[11px] leading-snug' : 'text-[12px] leading-relaxed'
                 } ${
-                  isActive ? 'text-chalk-text' : 'text-slate-400'
+                  isActive ? 'text-chalk-text' : isInVideo ? 'text-slate-300' : 'text-slate-400'
                 }`}>
                   {search ? highlightMatch(seg.text, search) : seg.text}
                 </span>
-                {onAskAbout && !isMobile && (
+                {onAskAbout && !isMobile && !isInVideo && (
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
