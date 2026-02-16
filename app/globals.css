@@ -1,0 +1,271 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --chalk-bg: #000000;
+  --chalk-surface: #111111;
+  --chalk-border: #222222;
+  --chalk-text: #f1f5f9;
+  --chalk-accent: #3b82f6;
+}
+
+html,
+body {
+  height: 100%;
+  height: 100dvh;
+  overflow: hidden;
+  /* iOS safe area support */
+  -webkit-text-size-adjust: 100%;
+}
+
+/* Safe area padding utilities for iOS notch/home indicator */
+.pb-safe {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+.mb-safe {
+  margin-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+.px-safe {
+  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+}
+
+/* Scrollbar styling */
+* {
+  scrollbar-color: #222222 transparent;
+  scrollbar-width: thin;
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #222222;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #333333;
+}
+
+/* Typing indicator animation */
+@keyframes typingDot {
+  0%, 60%, 100% {
+    opacity: 0.3;
+    transform: translateY(0);
+  }
+  30% {
+    opacity: 1;
+    transform: translateY(-4px);
+  }
+}
+
+.typing-dot {
+  animation: typingDot 1.4s infinite;
+}
+
+@keyframes tipProgress {
+  0% { width: 0%; }
+  100% { width: 100%; }
+}
+
+@keyframes activeBorderPulse {
+  0%, 100% { border-left-color: rgba(124, 207, 252, 0.7); }
+  50% { border-left-color: rgba(124, 207, 252, 0.25); }
+}
+
+@keyframes shake {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-6px); }
+  40% { transform: translateX(6px); }
+  60% { transform: translateX(-4px); }
+  80% { transform: translateX(4px); }
+}
+
+@keyframes shimmerText {
+  0% { background-position: -200% center; }
+  100% { background-position: 200% center; }
+}
+
+.shimmer-text {
+  background: linear-gradient(90deg, #94a3b8 0%, #e2e8f0 25%, #f8fafc 50%, #e2e8f0 75%, #94a3b8 100%);
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: shimmerText 3s linear 1;
+}
+
+.typing-dot:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.typing-dot:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+/* KaTeX overflow protection */
+.katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+  max-width: 100%;
+  padding: 2px 0;
+}
+
+.katex {
+  white-space: normal;
+  overflow-wrap: break-word;
+}
+
+/* Prevent inline LaTeX from forcing container wider */
+.katex-html {
+  max-width: 100%;
+}
+
+/* Overflow-wrap utility */
+.overflow-wrap-anywhere {
+  overflow-wrap: anywhere;
+}
+
+/* Vidstack YouTube embed: ensure native YouTube UI is hidden and Vidstack controls intercept events */
+[data-media-provider] iframe.vds-youtube[data-no-controls] {
+  pointer-events: none !important;
+}
+
+[data-media-provider] .vds-blocker {
+  z-index: 2 !important;
+  pointer-events: auto !important;
+}
+
+/* Mobile: block all iframe pointer events so taps go through Vidstack's blocker (inline play/pause) */
+@media (max-width: 767px) {
+  [data-media-provider] iframe {
+    pointer-events: none !important;
+  }
+  [data-media-provider] .vds-blocker {
+    position: absolute !important;
+    inset: 0 !important;
+  }
+}
+
+/* Karaoke caption word transitions */
+.karaoke-word {
+  transition: color 0.15s ease-out;
+  display: inline-block;
+}
+
+/* Active word snaps instantly — no transition delay */
+.karaoke-active {
+  transition: none;
+}
+
+/* Orbit animation */
+@keyframes orbitRotate {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@keyframes orbitRotateSlow {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+
+/* ── Video border + scroll badge color system ── */
+/* Badges: paused / neutral */
+[data-video-container] [data-scroll-badge] {
+  background-color: rgba(255, 255, 255, 0.12);
+  box-shadow: none;
+  transition: background-color 0.3s ease-out, box-shadow 0.3s ease-out;
+}
+
+/* Badges: playing / blue */
+[data-video-container][data-playing] [data-scroll-badge] {
+  background-color: rgb(59, 130, 246);
+  box-shadow: 0 10px 15px -3px rgba(59, 130, 246, 0.2);
+}
+
+/* Hover sync — paused: badge + border brighten to neutral highlight */
+[data-video-container]:has([data-scroll-badge]:hover) [data-video-border] {
+  border-color: rgba(255, 255, 255, 0.25) !important;
+}
+[data-video-container]:has([data-scroll-badge]:hover) [data-scroll-badge] {
+  background-color: rgba(255, 255, 255, 0.25) !important;
+}
+
+/* Hover sync — playing: badge + border brighten to blue-400 */
+[data-video-container][data-playing]:has([data-scroll-badge]:hover) [data-video-border] {
+  border-color: rgb(96, 165, 250) !important;
+}
+[data-video-container][data-playing]:has([data-scroll-badge]:hover) [data-scroll-badge] {
+  background-color: rgb(96, 165, 250) !important;
+  box-shadow: 0 10px 15px -3px rgba(96, 165, 250, 0.3) !important;
+}
+
+/* Mafs overrides for dark theme */
+.MafsView {
+  --mafs-bg: transparent !important;
+  --mafs-fg: #94a3b8 !important;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+/* 3D Hero Banner scroll animations */
+@layer utilities {
+  .animate-scroll-up {
+    animation: scroll-up linear infinite;
+    will-change: transform;
+  }
+
+  .animate-scroll-down {
+    animation: scroll-down linear infinite;
+    will-change: transform;
+  }
+}
+
+@keyframes scroll-up {
+  0% {
+    transform: translate3d(0, 0, 0);
+  }
+  100% {
+    transform: translate3d(0, -50%, 0);
+  }
+}
+
+@keyframes scroll-down {
+  0% {
+    transform: translate3d(0, -50%, 0);
+  }
+  100% {
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+/* Pause column scroll on hover so users can read cards */
+.hero-column:hover .animate-scroll-up,
+.hero-column:hover .animate-scroll-down {
+  animation-play-state: paused;
+}
+
+/* Hero card hover — no scale (prevents flicker in 3D perspective) */
+.hero-card {
+  transition: border-color 0.4s ease-out;
+}
+
+/* Indeterminate progress bar animation */
+@keyframes indeterminate-progress {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(350%); }
+}
+
+.animate-indeterminate {
+  animation: indeterminate-progress 1.5s ease-in-out infinite;
+}
