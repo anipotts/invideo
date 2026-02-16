@@ -92,12 +92,14 @@ function parseArgs() {
     return idx >= 0 && idx + 1 < args.length ? args[idx + 1] : null;
   };
 
+  const channelsRaw = get('--channels');
   return {
     batchSize: Math.min(parseInt(get('--batch-size') || '50', 10), 100),
     pollInterval: parseInt(get('--poll-interval') || '60', 10) * 1000,
     model: (get('--model') === 'opus' ? 'opus' : 'sonnet') as 'opus' | 'sonnet',
     once: args.includes('--once'),
     tier: get('--tier') || 'all',
+    channels: channelsRaw ? channelsRaw.split(',').map(s => s.trim().toLowerCase()) : null,
     dryRun: args.includes('--dry-run'),
   };
 }
@@ -142,6 +144,7 @@ async function getPendingVideos(
   client: SupabaseClient,
   limit: number,
   tierFilter: string,
+  channelFilter?: string[] | null,
 ): Promise<VideoManifestEntry[]> {
   // Load manifest
   const manifestPath = join(__dirname_compat, 'video-manifest.json');
@@ -151,9 +154,17 @@ async function getPendingVideos(
   }
 
   const manifest: VideoManifestEntry[] = JSON.parse(readFileSync(manifestPath, 'utf-8'));
-  const filtered = tierFilter === 'all'
+  let filtered = tierFilter === 'all'
     ? manifest
     : manifest.filter(v => String(v.tier) === tierFilter);
+
+  // Apply channel filter if specified
+  if (channelFilter && channelFilter.length > 0) {
+    filtered = filtered.filter(v =>
+      channelFilter.some(f => v.channelName.toLowerCase().includes(f))
+    );
+    log('WORKER', 'FILTER', `Channel filter matched ${filtered.length} videos`);
+  }
 
   // Check batch_progress for completed/in-progress
   const videoIds = filtered.map(v => v.videoId);
@@ -179,13 +190,83 @@ async function getPendingVideos(
   return pending.slice(0, limit);
 }
 
-// ─── Step 2: Transcribe ─────────────────────────────────────────────────────
+// ─── Step 2: Transcribe (WhisperX-primary) ──────────────────────────────────
 
-async function transcribeVideo(
+/**
+ * Discover all available WhisperX instances.
+ * Sources: WHISPERX_URLS env var (comma-separated) > WHISPERX_SERVICE_URL > service_registry.
+ */
+async function discoverWhisperXUrls(client: SupabaseClient): Promise<string[]> {
+  // Explicit multi-URL env var
+  if (process.env.WHISPERX_URLS) {
+    return process.env.WHISPERX_URLS.split(',').map(u => u.trim()).filter(Boolean);
+  }
+
+  // Single-URL env var
+  if (process.env.WHISPERX_SERVICE_URL) {
+    return [process.env.WHISPERX_SERVICE_URL];
+  }
+
+  // Service registry (may have one entry)
+  try {
+    const { data } = await client
+      .from('service_registry')
+      .select('url, updated_at')
+      .eq('service_name', 'whisperx');
+    if (data && data.length > 0) {
+      const fresh = (data as Array<{ url: string; updated_at: string }>).filter(row => {
+        const age = Date.now() - new Date(row.updated_at).getTime();
+        return age < 4 * 60 * 60 * 1000; // 4h staleness for batch (generous)
+      });
+      if (fresh.length > 0) return fresh.map(r => r.url);
+    }
+  } catch { /* ignore */ }
+
+  return [];
+}
+
+/**
+ * Transcribe a single video via WhisperX, with retry on 503 (GPU busy).
+ */
+async function transcribeViaWhisperX(
+  videoId: string,
+  whisperxUrl: string,
+): Promise<TranscriptSegment[]> {
+  const maxRetries = 3;
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    const resp = await fetch(`${whisperxUrl}/transcribe`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ video_id: videoId }),
+      signal: AbortSignal.timeout(300_000), // 5 min for long videos
+    });
+
+    if (resp.status === 503) {
+      // GPU busy — wait and retry
+      const delay = 15_000 * (attempt + 1);
+      log(videoId, 'WHISPERX', `GPU busy (503), retry ${attempt + 1}/${maxRetries} in ${delay / 1000}s`);
+      await sleep(delay);
+      continue;
+    }
+
+    if (!resp.ok) throw new Error(`WhisperX ${resp.status}: ${await resp.text()}`);
+
+    const data = await resp.json() as { segments?: TranscriptSegment[] };
+    if (!data.segments?.length) throw new Error('WhisperX returned no segments');
+
+    return data.segments;
+  }
+
+  throw new Error('WhisperX GPU busy after max retries');
+}
+
+/**
+ * Check Supabase transcript cache for a video.
+ */
+async function checkTranscriptCache(
   client: SupabaseClient,
   videoId: string,
 ): Promise<{ segments: TranscriptSegment[]; metadata: VideoMetadata } | null> {
-  // Check cache first
   const { data: cached } = await client
     .from('transcripts')
     .select('segments, video_title, duration_seconds')
@@ -194,29 +275,68 @@ async function transcribeVideo(
 
   if (cached && (cached as { segments: TranscriptSegment[] }).segments?.length > 0) {
     const c = cached as { segments: TranscriptSegment[]; video_title: string; duration_seconds: number };
-    log(videoId, 'TRANSCRIPT', `cached (${c.segments.length} segments)`);
-
-    let metadata: VideoMetadata = { title: c.video_title, lengthSeconds: Math.round(c.duration_seconds) };
-
-    // Try to get channel info
-    try {
-      const { captionRace } = await import('../lib/transcript');
-      const raceResult = await captionRace(videoId);
-      if (raceResult.metadata) metadata = { ...metadata, ...raceResult.metadata };
-    } catch {
-      // Fallback to oEmbed
-      const oembed = await fetchVideoMetadata(videoId);
-      if (oembed.title) metadata.title = metadata.title || oembed.title;
-      if (oembed.author) metadata.author = oembed.author;
-    }
-
+    const metadata: VideoMetadata = { title: c.video_title, lengthSeconds: Math.round(c.duration_seconds) };
     return { segments: c.segments, metadata };
   }
 
-  // Fetch fresh
-  log(videoId, 'TRANSCRIPT', 'fetching...');
+  return null;
+}
+
+/**
+ * Full transcription: cache → WhisperX → web-scrape fallback.
+ * Saves result to Supabase transcripts table.
+ */
+async function transcribeVideo(
+  client: SupabaseClient,
+  videoId: string,
+  whisperxUrl?: string,
+): Promise<{ segments: TranscriptSegment[]; metadata: VideoMetadata } | null> {
+  // Check cache first
+  const cached = await checkTranscriptCache(client, videoId);
+  if (cached) {
+    log(videoId, 'TRANSCRIPT', `cached (${cached.segments.length} segments)`);
+    // Backfill metadata via oEmbed
+    if (!cached.metadata.author) {
+      const oembed = await fetchVideoMetadata(videoId);
+      if (oembed.title && !cached.metadata.title) cached.metadata.title = oembed.title;
+      if (oembed.author) cached.metadata.author = oembed.author;
+    }
+    return cached;
+  }
+
+  const { cleanSegments, deduplicateSegments, mergeIntoSentences } = await import('../lib/transcript');
+
+  // WhisperX primary
+  if (whisperxUrl) {
+    try {
+      log(videoId, 'TRANSCRIPT', `WhisperX → ${new URL(whisperxUrl).host}...`);
+      const rawSegments = await transcribeViaWhisperX(videoId, whisperxUrl);
+      const cleaned = mergeIntoSentences(deduplicateSegments(cleanSegments(rawSegments)));
+      const oembed = await fetchVideoMetadata(videoId);
+      const metadata: VideoMetadata = { title: oembed.title, author: oembed.author };
+      const lastSeg = cleaned[cleaned.length - 1];
+      const durationSeconds = lastSeg ? lastSeg.offset + lastSeg.duration : 0;
+
+      await client.from('transcripts').upsert({
+        video_id: videoId,
+        segments: cleaned,
+        source: 'whisperx',
+        segment_count: cleaned.length,
+        duration_seconds: durationSeconds,
+        video_title: metadata.title || null,
+      }, { onConflict: 'video_id' });
+
+      log(videoId, 'TRANSCRIPT', `WhisperX done (${cleaned.length} segments)`);
+      return { segments: cleaned, metadata };
+    } catch (err) {
+      log(videoId, 'TRANSCRIPT', `WhisperX failed: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  // Fallback: web-scrape captions (free, fast, works ~80% of videos)
   try {
-    const { fetchTranscript, cleanSegments, deduplicateSegments, mergeIntoSentences } = await import('../lib/transcript');
+    log(videoId, 'TRANSCRIPT', 'falling back to web-scrape captions...');
+    const { fetchTranscript } = await import('../lib/transcript');
     const result = await fetchTranscript(videoId);
     const cleaned = mergeIntoSentences(deduplicateSegments(cleanSegments(result.segments)));
     const metadata: VideoMetadata = result.metadata || {};
@@ -232,7 +352,7 @@ async function transcribeVideo(
       video_title: metadata.title || null,
     }, { onConflict: 'video_id' });
 
-    log(videoId, 'TRANSCRIPT', `fetched via ${result.source} (${cleaned.length} segments)`);
+    log(videoId, 'TRANSCRIPT', `web-scrape done via ${result.source} (${cleaned.length} segments)`);
     return { segments: cleaned, metadata };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -251,6 +371,44 @@ async function fetchVideoMetadata(videoId: string): Promise<{ title?: string; au
   } catch {
     return {};
   }
+}
+
+/**
+ * Format a transcription result into a PreparedVideo for batch submission.
+ */
+async function prepareVideo(
+  manifest: VideoManifestEntry,
+  result: { segments: TranscriptSegment[]; metadata: VideoMetadata },
+): Promise<PreparedVideo> {
+  // Backfill title/author via oEmbed if missing
+  if (!result.metadata.title || !result.metadata.author) {
+    const oembed = await fetchVideoMetadata(manifest.videoId);
+    if (oembed.title && !result.metadata.title) result.metadata.title = oembed.title;
+    if (oembed.author && !result.metadata.author) result.metadata.author = oembed.author;
+  }
+
+  const maxChars = 200_000;
+  let formatted = result.segments
+    .map(s => {
+      const mins = Math.floor(s.offset / 60);
+      const secs = Math.floor(s.offset % 60);
+      return `[${mins}:${secs.toString().padStart(2, '0')}] ${s.text}`;
+    })
+    .join('\n');
+
+  if (formatted.length > maxChars) {
+    formatted = formatted.slice(0, maxChars) + '\n\n[TRANSCRIPT TRUNCATED]';
+  }
+
+  return {
+    videoId: manifest.videoId,
+    channelName: manifest.channelName,
+    title: manifest.title,
+    tier: manifest.tier,
+    segments: result.segments,
+    metadata: result.metadata,
+    formattedTranscript: formatted,
+  };
 }
 
 // ─── Step 3: Build Batch Request ────────────────────────────────────────────
@@ -335,8 +493,21 @@ async function submitBatch(
 
   log('BATCH', 'SUBMIT', `submitting ${requests.length} requests (${modelChoice})...`);
 
-  const batch = await anthropic.messages.batches.create({ requests });
+  // Retry with exponential backoff (batch submission is the most expensive failure point)
+  let batch: Anthropic.Messages.Batches.MessageBatch | undefined;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      batch = await anthropic.messages.batches.create({ requests });
+      break;
+    } catch (err) {
+      if (attempt === 2) throw err;
+      const delay = 10_000 * Math.pow(2, attempt); // 10s, 20s
+      log('BATCH', 'SUBMIT', `attempt ${attempt + 1} failed: ${err instanceof Error ? err.message : err}, retrying in ${delay / 1000}s...`);
+      await sleep(delay);
+    }
+  }
 
+  if (!batch) throw new Error('Batch submission failed after all retries');
   log('BATCH', 'SUBMIT', `batch ${batch.id} created, status: ${batch.processing_status}`);
 
   // Mark videos as batch_queued
@@ -360,8 +531,19 @@ async function pollBatch(
   intervalMs: number,
 ): Promise<Anthropic.Messages.Batches.MessageBatch> {
   let lastLog = 0;
+  let consecutiveErrors = 0;
   while (true) {
-    const batch = await anthropic.messages.batches.retrieve(batchId);
+    let batch: Anthropic.Messages.Batches.MessageBatch;
+    try {
+      batch = await anthropic.messages.batches.retrieve(batchId);
+      consecutiveErrors = 0;
+    } catch (err) {
+      consecutiveErrors++;
+      if (consecutiveErrors >= 10) throw err; // give up after 10 consecutive poll failures
+      log('BATCH', 'POLL', `retrieve failed (${consecutiveErrors}/10): ${err instanceof Error ? err.message : err}`);
+      await sleep(intervalMs);
+      continue;
+    }
     const counts = batch.request_counts;
 
     const now = Date.now();
@@ -462,7 +644,7 @@ async function processResults(
 
       // Run normalize + connect + enrich + embed
       if (prepared) {
-        await normalizeAndFinish(client, videoId, extraction, prepared, modelId, costCents);
+        await normalizeAndFinish(client, videoId, extraction, prepared, modelId, costCents, usage.input_tokens, usage.output_tokens);
       }
 
       succeeded++;
@@ -494,6 +676,8 @@ async function normalizeAndFinish(
   prepared: PreparedVideo,
   modelId: string,
   costCents: number,
+  tokensInput: number,
+  tokensOutput: number,
 ) {
   const { segments, metadata } = prepared;
 
@@ -548,8 +732,8 @@ async function normalizeAndFinish(
     key_moments: (extraction.moments || []).filter((m: ExtractionData) => (m.importance || 0) >= 0.7),
     raw_extraction: extraction,
     extraction_model: modelId,
-    extraction_tokens_input: 0,
-    extraction_tokens_output: 0,
+    extraction_tokens_input: tokensInput,
+    extraction_tokens_output: tokensOutput,
     extraction_cost_cents: costCents,
     extraction_version: 3,
     thumbnail_url: `https://i.ytimg.com/vi/${videoId}/mqdefault.jpg`,
@@ -757,6 +941,99 @@ async function normalizeAndFinish(
   }).eq('video_id', videoId);
 }
 
+// ─── Graceful Shutdown ───────────────────────────────────────────────────────
+
+let shutdownRequested = false;
+let activeBatchId: string | null = null;
+
+function setupShutdown() {
+  const handler = () => {
+    if (shutdownRequested) {
+      log('WORKER', 'SHUTDOWN', 'forced exit');
+      process.exit(1);
+    }
+    shutdownRequested = true;
+    if (activeBatchId) {
+      log('WORKER', 'SHUTDOWN', `graceful shutdown requested — batch ${activeBatchId} will continue on Anthropic's servers. Re-run worker to resume processing results.`);
+    } else {
+      log('WORKER', 'SHUTDOWN', 'graceful shutdown — finishing current step...');
+    }
+  };
+  process.on('SIGINT', handler);
+  process.on('SIGTERM', handler);
+}
+
+// ─── Batch Recovery ──────────────────────────────────────────────────────────
+
+async function recoverInFlightBatches(
+  anthropic: Anthropic,
+  client: SupabaseClient,
+  modelChoice: 'opus' | 'sonnet',
+): Promise<number> {
+  // Find videos stuck in batch_queued (worker crashed during polling)
+  const { data } = await client
+    .from('batch_progress')
+    .select('video_id, metadata')
+    .eq('status', 'batch_queued');
+
+  if (!data || data.length === 0) return 0;
+
+  // Group by batch_id
+  const batchMap = new Map<string, string[]>();
+  for (const row of data as Array<{ video_id: string; metadata: { batch_id?: string } }>) {
+    const batchId = row.metadata?.batch_id;
+    if (!batchId) continue;
+    if (!batchMap.has(batchId)) batchMap.set(batchId, []);
+    batchMap.get(batchId)!.push(row.video_id);
+  }
+
+  if (batchMap.size === 0) return 0;
+
+  log('WORKER', 'RECOVER', `found ${batchMap.size} in-flight batch(es) with ${data.length} videos`);
+
+  let recovered = 0;
+  for (const [batchId, videoIds] of batchMap) {
+    try {
+      const batch = await anthropic.messages.batches.retrieve(batchId);
+      if (batch.processing_status === 'ended') {
+        log('WORKER', 'RECOVER', `batch ${batchId} already ended — processing ${videoIds.length} results`);
+
+        // Rebuild preparedMap from transcripts table
+        const preparedMap = new Map<string, PreparedVideo>();
+        for (const vid of videoIds) {
+          const result = await transcribeVideo(client, vid);
+          if (!result) continue;
+          const formatted = result.segments
+            .map(s => {
+              const mins = Math.floor(s.offset / 60);
+              const secs = Math.floor(s.offset % 60);
+              return `[${mins}:${secs.toString().padStart(2, '0')}] ${s.text}`;
+            })
+            .join('\n');
+          preparedMap.set(vid, {
+            videoId: vid,
+            channelName: '',
+            title: result.metadata.title || vid,
+            tier: 2,
+            segments: result.segments,
+            metadata: result.metadata,
+            formattedTranscript: formatted,
+          });
+        }
+
+        const { succeeded } = await processResults(anthropic, client, batchId, preparedMap, modelChoice);
+        recovered += succeeded;
+      } else {
+        log('WORKER', 'RECOVER', `batch ${batchId} still ${batch.processing_status} — will poll in main loop`);
+      }
+    } catch (err) {
+      log('WORKER', 'RECOVER', `failed to check batch ${batchId}: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  return recovered;
+}
+
 // ─── Main Worker Loop ───────────────────────────────────────────────────────
 
 async function main() {
@@ -764,24 +1041,36 @@ async function main() {
   const client = getSupabase();
   const anthropic = getAnthropic();
 
+  // Discover WhisperX instances
+  const whisperxUrls = await discoverWhisperXUrls(client);
+
   console.log(`\n=== Chalk Batch Worker ===`);
   console.log(`  Model: ${config.model}`);
   console.log(`  Batch size: ${config.batchSize}`);
   console.log(`  Poll interval: ${config.pollInterval / 1000}s`);
   console.log(`  Tier: ${config.tier}`);
+  console.log(`  WhisperX instances: ${whisperxUrls.length > 0 ? whisperxUrls.join(', ') : 'none (web-scrape only)'}`);
   console.log(`  Mode: ${config.once ? 'single batch' : 'continuous loop'}`);
   console.log(`  Dry run: ${config.dryRun}\n`);
 
-  let totalProcessed = 0;
+  setupShutdown();
+
+  // Recover any in-flight batches from previous crashes
+  const recovered = await recoverInFlightBatches(anthropic, client, config.model);
+  if (recovered > 0) {
+    log('WORKER', 'RECOVER', `recovered ${recovered} videos from previous batches`);
+  }
+
+  let totalProcessed = recovered;
   let totalCost = 0;
   let iteration = 0;
 
-  while (true) {
+  while (!shutdownRequested) {
     iteration++;
     log('WORKER', 'LOOP', `iteration ${iteration}`);
 
     // 1. Find pending videos
-    const pending = await getPendingVideos(client, config.batchSize, config.tier);
+    const pending = await getPendingVideos(client, config.batchSize, config.tier, config.channels);
 
     if (pending.length === 0) {
       log('WORKER', 'LOOP', 'no pending videos');
@@ -802,15 +1091,70 @@ async function main() {
       break;
     }
 
-    // 2. Transcribe all videos (parallel, p-limit 2)
-    log('WORKER', 'TRANSCRIBE', `transcribing ${pending.length} videos...`);
-    const limit = pLimit(2);
-    const prepared: PreparedVideo[] = [];
+    // 2. Transcribe — WhisperX primary, smart instance distribution
+    log('WORKER', 'TRANSCRIBE', `transcribing ${pending.length} videos (${whisperxUrls.length} WhisperX instances)...`);
 
-    await Promise.allSettled(
-      pending.map(v =>
-        limit(async () => {
-          // Initialize batch_progress
+    // Phase 2a: Check all caches in parallel (fast, I/O only)
+    const cacheLimit = pLimit(20);
+    const cacheResults = await Promise.all(
+      pending.map(v => cacheLimit(() => checkTranscriptCache(client, v.videoId))),
+    );
+
+    const cached: PreparedVideo[] = [];
+    const uncached: VideoManifestEntry[] = [];
+
+    for (let i = 0; i < pending.length; i++) {
+      const v = pending[i];
+      const result = cacheResults[i];
+      if (result) {
+        log(v.videoId, 'TRANSCRIPT', `cached (${result.segments.length} segments)`);
+        cached.push(await prepareVideo(v, result));
+      } else {
+        uncached.push(v);
+      }
+    }
+
+    log('WORKER', 'TRANSCRIBE', `${cached.length} cached, ${uncached.length} need transcription`);
+
+    // Phase 2b: Transcribe uncached via WhisperX with per-instance concurrency
+    const transcribed: PreparedVideo[] = [];
+
+    if (uncached.length > 0 && whisperxUrls.length > 0) {
+      // One semaphore per WhisperX GPU instance (1 concurrent job per GPU)
+      const instanceLimits = whisperxUrls.map(() => pLimit(1));
+      let instanceIdx = 0;
+
+      await Promise.allSettled(
+        uncached.map(v => {
+          // Round-robin assign to WhisperX instances
+          const idx = instanceIdx++ % whisperxUrls.length;
+          return instanceLimits[idx](async () => {
+            await client.from('batch_progress').upsert({
+              video_id: v.videoId,
+              status: 'pending',
+              started_at: new Date().toISOString(),
+              last_attempt_at: new Date().toISOString(),
+              extraction_version: 3,
+            }, { onConflict: 'video_id' });
+
+            const result = await transcribeVideo(client, v.videoId, whisperxUrls[idx]);
+            if (!result) return;
+
+            transcribed.push(await prepareVideo(v, result));
+            await client.from('batch_progress').update({
+              status: 'transcript_done',
+              last_attempt_at: new Date().toISOString(),
+            }).eq('video_id', v.videoId);
+          });
+        }),
+      );
+
+      log('WORKER', 'TRANSCRIBE', `WhisperX transcribed ${transcribed.length}/${uncached.length}`);
+    } else if (uncached.length > 0) {
+      // No WhisperX available — fall back to web-scrape for all
+      const fallbackLimit = pLimit(6);
+      await Promise.allSettled(
+        uncached.map(v => fallbackLimit(async () => {
           await client.from('batch_progress').upsert({
             video_id: v.videoId,
             status: 'pending',
@@ -822,44 +1166,27 @@ async function main() {
           const result = await transcribeVideo(client, v.videoId);
           if (!result) return;
 
-          // Format transcript
-          const maxChars = 200_000;
-          let formatted = result.segments
-            .map(s => {
-              const mins = Math.floor(s.offset / 60);
-              const secs = Math.floor(s.offset % 60);
-              return `[${mins}:${secs.toString().padStart(2, '0')}] ${s.text}`;
-            })
-            .join('\n');
-
-          if (formatted.length > maxChars) {
-            formatted = formatted.slice(0, maxChars) + '\n\n[TRANSCRIPT TRUNCATED]';
-          }
-
-          // Backfill title/author via oEmbed if missing
-          if (!result.metadata.title || !result.metadata.author) {
-            const oembed = await fetchVideoMetadata(v.videoId);
-            if (oembed.title && !result.metadata.title) result.metadata.title = oembed.title;
-            if (oembed.author && !result.metadata.author) result.metadata.author = oembed.author;
-          }
-
-          prepared.push({
-            videoId: v.videoId,
-            channelName: v.channelName,
-            title: v.title,
-            tier: v.tier,
-            segments: result.segments,
-            metadata: result.metadata,
-            formattedTranscript: formatted,
-          });
-
+          transcribed.push(await prepareVideo(v, result));
           await client.from('batch_progress').update({
             status: 'transcript_done',
             last_attempt_at: new Date().toISOString(),
           }).eq('video_id', v.videoId);
-        }),
-      ),
-    );
+        })),
+      );
+    }
+
+    // Mark cached videos in batch_progress
+    for (const v of cached) {
+      await client.from('batch_progress').upsert({
+        video_id: v.videoId,
+        status: 'transcript_done',
+        started_at: new Date().toISOString(),
+        last_attempt_at: new Date().toISOString(),
+        extraction_version: 3,
+      }, { onConflict: 'video_id' });
+    }
+
+    const prepared = [...cached, ...transcribed];
 
     if (prepared.length === 0) {
       log('WORKER', 'TRANSCRIBE', 'no videos transcribed successfully');
@@ -872,9 +1199,11 @@ async function main() {
     // 3. Submit batch
     const preparedMap = new Map(prepared.map(v => [v.videoId, v]));
     const batchId = await submitBatch(anthropic, client, prepared, config.model);
+    activeBatchId = batchId;
 
     // 4. Poll for completion
     const completedBatch = await pollBatch(anthropic, batchId, config.pollInterval);
+    activeBatchId = null;
 
     // 5. Process results
     const { succeeded, failed, totalCostCents } = await processResults(
