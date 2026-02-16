@@ -47,7 +47,7 @@ function setL1(videoId: string, entry: CachedTranscript): void {
 
 // ─── L2: Supabase cache ──────────────────────────────────────────────────────
 
-const VALID_SOURCES: Set<string> = new Set(['web-scrape', 'whisperx', 'groq-whisper', 'deepgram']);
+const VALID_SOURCES: Set<string> = new Set(['web-scrape', 'whisperx', 'groq-whisper', 'deepgram', 'innertube', 'yt-dlp']);
 
 /** Validate that cached data has the expected shape. */
 function validateCachedSegments(data: unknown): data is { segments: TranscriptSegment[]; source: TranscriptSource } {

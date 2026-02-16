@@ -400,7 +400,7 @@ async function transcribeVideo(
     await client.from('transcripts').upsert({
       video_id: videoId,
       segments: cleaned,
-      source: result.source,
+      source: 'web-scrape',
       segment_count: cleaned.length,
       duration_seconds: durationSeconds,
       video_title: metadata.title || null,
