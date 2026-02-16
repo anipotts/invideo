@@ -1,0 +1,46 @@
+{
+  "name": "invideo",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^3.0.41",
+    "@anthropic-ai/sdk": "^0.74.0",
+    "@phosphor-icons/react": "^2.1.10",
+    "@supabase/supabase-js": "^2.95.3",
+    "@types/three": "^0.182.0",
+    "@upstash/ratelimit": "^2.0.8",
+    "@upstash/redis": "^1.36.2",
+    "@upstash/vector": "^1.2.2",
+    "@vidstack/react": "^1.12.13",
+    "ai": "^6.0.78",
+    "framer-motion": "^12.34.0",
+    "highlight.js": "^11.11.1",
+    "katex": "^0.16.28",
+    "nanoid": "^5.1.6",
+    "next": "^16.1.6",
+    "p-limit": "^3.1.0",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "react-error-boundary": "^6.1.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/katex": "^0.16.8",
+    "@types/node": "25.2.3",
+    "@types/react": "^19.2.13",
+    "@types/react-dom": "^19.2.3",
+    "autoprefixer": "^10.4.24",
+    "eslint": "^10.0.0",
+    "eslint-config-next": "^16.1.6",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^3.4.19",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}
