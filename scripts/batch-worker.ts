@@ -262,8 +262,9 @@ async function transcribeViaWhisperX(
 
 // ─── Captions-First Optimization ─────────────────────────────────────────────
 
-/** Rate-limited delay between YouTube page fetches to avoid 429 rate limits */
-const WEB_SCRAPE_DELAY_MS = 1500;
+/** Rate-limited delay between YouTube page fetches to avoid 429 rate limits.
+ *  3s between requests = ~20 req/min — well under YouTube's threshold. */
+const WEB_SCRAPE_DELAY_MS = 3000;
 let lastWebScrapeTime = 0;
 
 async function rateLimitWebScrape(): Promise<void> {
@@ -1175,7 +1176,7 @@ async function main() {
     const needWhisperX: VideoManifestEntry[] = [];
 
     if (uncached.length > 0) {
-      const captionLimit = pLimit(2); // Low concurrency + internal rate limiter avoids 429
+      const captionLimit = pLimit(1); // Serial + 3s rate limiter avoids YouTube 429
       log('WORKER', 'CAPTIONS', `trying YouTube captions for ${uncached.length} videos...`);
 
       const captionResults = await Promise.allSettled(
