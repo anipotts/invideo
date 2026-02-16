@@ -260,6 +260,59 @@ async function transcribeViaWhisperX(
   throw new Error('WhisperX GPU busy after max retries');
 }
 
+// ─── Captions-First Optimization ─────────────────────────────────────────────
+
+/** Rate-limited delay between YouTube page fetches to avoid 429 rate limits */
+const WEB_SCRAPE_DELAY_MS = 1500;
+let lastWebScrapeTime = 0;
+
+async function rateLimitWebScrape(): Promise<void> {
+  const now = Date.now();
+  const elapsed = now - lastWebScrapeTime;
+  if (elapsed < WEB_SCRAPE_DELAY_MS) {
+    await sleep(WEB_SCRAPE_DELAY_MS - elapsed);
+  }
+  lastWebScrapeTime = Date.now();
+}
+
+/**
+ * Try to fetch YouTube auto-captions only (no STT cascade, no WhisperX).
+ * Uses captionRace() which does a single web-scrape page fetch.
+ * Returns null if captions are unavailable for this video.
+ */
+async function tryCaptionFetch(
+  client: SupabaseClient,
+  videoId: string,
+): Promise<{ segments: TranscriptSegment[]; metadata: VideoMetadata } | null> {
+  await rateLimitWebScrape();
+
+  const { captionRace, cleanSegments, deduplicateSegments, mergeIntoSentences } =
+    await import('../lib/transcript');
+
+  try {
+    const result = await captionRace(videoId);
+    const cleaned = mergeIntoSentences(deduplicateSegments(cleanSegments(result.segments)));
+    if (cleaned.length === 0) return null;
+
+    const metadata: VideoMetadata = result.metadata || {};
+    const lastSeg = cleaned[cleaned.length - 1];
+    const durationSeconds = lastSeg ? lastSeg.offset + lastSeg.duration : 0;
+
+    await client.from('transcripts').upsert({
+      video_id: videoId,
+      segments: cleaned,
+      source: 'web-scrape',
+      segment_count: cleaned.length,
+      duration_seconds: durationSeconds,
+      video_title: metadata.title || null,
+    }, { onConflict: 'video_id' });
+
+    return { segments: cleaned, metadata };
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Check Supabase transcript cache for a video.
  */
@@ -1091,10 +1144,10 @@ async function main() {
       break;
     }
 
-    // 2. Transcribe — WhisperX primary, smart instance distribution
-    log('WORKER', 'TRANSCRIBE', `transcribing ${pending.length} videos (${whisperxUrls.length} WhisperX instances)...`);
+    // 2. Transcribe — 3-phase: cache → YouTube captions (free) → WhisperX (GPU)
+    log('WORKER', 'TRANSCRIBE', `transcribing ${pending.length} videos...`);
 
-    // Phase 2a: Check all caches in parallel (fast, I/O only)
+    // Phase 2a: Check all Supabase transcript caches in parallel (fast, I/O only)
     const cacheLimit = pLimit(20);
     const cacheResults = await Promise.all(
       pending.map(v => cacheLimit(() => checkTranscriptCache(client, v.videoId))),
@@ -1116,17 +1169,47 @@ async function main() {
 
     log('WORKER', 'TRANSCRIBE', `${cached.length} cached, ${uncached.length} need transcription`);
 
-    // Phase 2b: Transcribe uncached via WhisperX with per-instance concurrency
+    // Phase 2b: YouTube auto-captions for all uncached (FREE, ~1.5s/video)
+    // ~80% of educational videos have YouTube captions — this saves hours of GPU time
     const transcribed: PreparedVideo[] = [];
+    const needWhisperX: VideoManifestEntry[] = [];
 
-    if (uncached.length > 0 && whisperxUrls.length > 0) {
-      // One semaphore per WhisperX GPU instance (1 concurrent job per GPU)
+    if (uncached.length > 0) {
+      const captionLimit = pLimit(2); // Low concurrency + internal rate limiter avoids 429
+      log('WORKER', 'CAPTIONS', `trying YouTube captions for ${uncached.length} videos...`);
+
+      const captionResults = await Promise.allSettled(
+        uncached.map(v => captionLimit(async () => {
+          const result = await tryCaptionFetch(client, v.videoId);
+          if (result) {
+            log(v.videoId, 'CAPTIONS', `OK (${result.segments.length} segments)`);
+            return { video: v, result };
+          }
+          return null;
+        })),
+      );
+
+      for (let i = 0; i < uncached.length; i++) {
+        const cr = captionResults[i];
+        if (cr.status === 'fulfilled' && cr.value) {
+          transcribed.push(await prepareVideo(cr.value.video, cr.value.result));
+        } else {
+          needWhisperX.push(uncached[i]);
+        }
+      }
+
+      log('WORKER', 'CAPTIONS', `${transcribed.length}/${uncached.length} have YouTube captions, ${needWhisperX.length} need WhisperX`);
+    }
+
+    // Phase 2c: WhisperX GPU for videos WITHOUT YouTube captions (~20%)
+    if (needWhisperX.length > 0 && whisperxUrls.length > 0) {
+      log('WORKER', 'WHISPERX', `transcribing ${needWhisperX.length} caption-less videos on ${whisperxUrls.length} GPU(s)...`);
       const instanceLimits = whisperxUrls.map(() => pLimit(1));
       let instanceIdx = 0;
+      const whisperXBefore = transcribed.length;
 
       await Promise.allSettled(
-        uncached.map(v => {
-          // Round-robin assign to WhisperX instances
+        needWhisperX.map(v => {
           const idx = instanceIdx++ % whisperxUrls.length;
           return instanceLimits[idx](async () => {
             await client.from('batch_progress').upsert({
@@ -1149,30 +1232,9 @@ async function main() {
         }),
       );
 
-      log('WORKER', 'TRANSCRIBE', `WhisperX transcribed ${transcribed.length}/${uncached.length}`);
-    } else if (uncached.length > 0) {
-      // No WhisperX available — fall back to web-scrape for all
-      const fallbackLimit = pLimit(6);
-      await Promise.allSettled(
-        uncached.map(v => fallbackLimit(async () => {
-          await client.from('batch_progress').upsert({
-            video_id: v.videoId,
-            status: 'pending',
-            started_at: new Date().toISOString(),
-            last_attempt_at: new Date().toISOString(),
-            extraction_version: 3,
-          }, { onConflict: 'video_id' });
-
-          const result = await transcribeVideo(client, v.videoId);
-          if (!result) return;
-
-          transcribed.push(await prepareVideo(v, result));
-          await client.from('batch_progress').update({
-            status: 'transcript_done',
-            last_attempt_at: new Date().toISOString(),
-          }).eq('video_id', v.videoId);
-        })),
-      );
+      log('WORKER', 'WHISPERX', `${transcribed.length - whisperXBefore}/${needWhisperX.length} transcribed via GPU`);
+    } else if (needWhisperX.length > 0) {
+      log('WORKER', 'WHISPERX', `${needWhisperX.length} videos need WhisperX but no GPU instances available — skipping`);
     }
 
     // Mark cached videos in batch_progress
