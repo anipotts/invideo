@@ -58,5 +58,6 @@ greptile.json
 # build artifacts
 .next.old/
 
-# claude code
+# claude code & git backup
 .claude/
+.git.bak/
