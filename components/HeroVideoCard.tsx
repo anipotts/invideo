@@ -156,15 +156,17 @@ export function HeroVideoCard({
             <div className="absolute inset-0 bg-gradient-to-t to-transparent transition-all duration-500 from-black/60 via-black/20 group-hover:from-black/85 group-hover:via-black/50" />
 
             <div className="relative px-2.5 pb-2">
-              {/* Question — stretched across card width, single line, left-aligned */}
-              <div className="w-full bg-white/[0.05] group-hover:bg-white/[0.08] border border-white/[0.08] group-hover:border-white/[0.15] rounded-lg px-2 py-1.5 transition-all duration-500">
-                <p className="text-[9px] leading-snug text-white/25 group-hover:text-white/80 font-medium truncate text-left">
-                  {conversation.question}
-                </p>
+              {/* Question — user message, right-aligned per chat convention */}
+              <div className="flex justify-end">
+                <div className="max-w-[85%] bg-white/[0.06] group-hover:bg-white/[0.10] border border-white/[0.08] group-hover:border-white/[0.15] rounded-lg px-2 py-1.5 transition-all duration-500">
+                  <p className="text-[9px] leading-snug text-white/25 group-hover:text-white/80 font-medium truncate">
+                    {conversation.question}
+                  </p>
+                </div>
               </div>
-              {/* AI response — appears on hover, left-aligned */}
+              {/* AI response — left-aligned, appears on hover */}
               <div className="mt-1.5 max-h-0 group-hover:max-h-28 opacity-0 group-hover:opacity-100 transition-all duration-500 overflow-hidden">
-                <div className="flex gap-1 justify-start items-center mb-1">
+                <div className="flex gap-1 items-center mb-1">
                   <p className="text-[8px] text-chalk-accent/80 font-medium tracking-wide uppercase">
                     {channelName}
                   </p>
@@ -173,7 +175,7 @@ export function HeroVideoCard({
                   </span>
                 </div>
                 <p className="text-[9px] leading-snug text-slate-300/80 line-clamp-3">
-                  {conversation.answer}{" "}
+                  {conversation.answer}
                 </p>
               </div>
             </div>
