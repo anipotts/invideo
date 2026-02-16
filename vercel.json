@@ -1,0 +1,30 @@
+{
+  "framework": "nextjs",
+  "regions": ["sfo1"],
+  "functions": {
+    "app/api/generate/route.ts": {
+      "maxDuration": 300
+    },
+    "app/api/transcript/route.ts": {
+      "maxDuration": 300
+    },
+    "app/api/transcript/stream/route.ts": {
+      "maxDuration": 300
+    },
+    "app/api/video-chat/route.ts": {
+      "maxDuration": 300
+    },
+    "app/api/learn-mode/route.ts": {
+      "maxDuration": 300
+    },
+    "app/api/youtube/warm-cache/route.ts": {
+      "maxDuration": 300
+    },
+    "app/api/learn-options/route.ts": {
+      "maxDuration": 60
+    },
+    "app/api/extract/route.ts": {
+      "maxDuration": 300
+    }
+  }
+}
