@@ -105,7 +105,7 @@ export function HeroVideoCard({
       }}
     >
       {/* Metadata row — above thumbnail */}
-      <div className="flex items-center gap-2 px-2.5 py-1.5 border-b border-white/[0.06]">
+      <div className="flex items-center gap-2 px-2.5 py-1.5 border-b border-white/[0.06] group-hover:border-chalk-accent/60 transition-all ease-out duration-400">
         {CHANNEL_AVATARS[channelName] && !avatarError && (
           <img
             src={CHANNEL_AVATARS[channelName]}
