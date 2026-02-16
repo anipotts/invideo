@@ -1,4 +1,4 @@
-const INVIDEO_BASE = "https://chalk-tan.vercel.app";
+const INVIDEO_BASE = "https://invideochat.vercel.app";
 
 function buildInVideoUrl() {
   const params = new URLSearchParams(window.location.search);
@@ -66,11 +66,16 @@ function injectButton() {
   btn.rel = "noopener";
   btn.className = "invideo-yt-btn";
 
-  // ChalkboardSimple icon
+  // ChalkboardSimple ↔ Chalkboard hover swap (matches ChalkIcon.tsx)
   btn.innerHTML =
-    '<svg viewBox="0 0 256 256" width="24" height="24" class="invideo-yt-icon">' +
+    '<span class="invideo-icon-wrap">' +
+    '<svg viewBox="0 0 256 256" width="24" height="24" class="invideo-yt-icon invideo-icon-simple">' +
     '<path d="M240,192h-8V168a8,8,0,0,0-8-8H160a8,8,0,0,0-8,8v24H40V56H216v80a8,8,0,0,0,16,0V56a16,16,0,0,0-16-16H40A16,16,0,0,0,24,56V192H16a8,8,0,0,0,0,16H240a8,8,0,0,0,0-16Zm-72-16h48v16H168Z" fill="currentColor"/>' +
     "</svg>" +
+    '<svg viewBox="0 0 256 256" width="24" height="24" class="invideo-yt-icon invideo-icon-full">' +
+    '<path d="M240,192h-8V56a16,16,0,0,0-16-16H40A16,16,0,0,0,24,56V192H16a8,8,0,0,0,0,16H240a8,8,0,0,0,0-16ZM40,56H216V192H200V168a8,8,0,0,0-8-8H120a8,8,0,0,0-8,8v24H72V88H184v48a8,8,0,0,0,16,0V80a8,8,0,0,0-8-8H64a8,8,0,0,0-8,8V192H40ZM184,192H128V176h56Z" fill="currentColor"/>' +
+    "</svg>" +
+    "</span>" +
     "<span>InVideo</span>";
 
   btn.addEventListener("click", (e) => {

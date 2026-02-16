@@ -7,15 +7,13 @@ import React, {
   useCallback,
   useMemo,
 } from "react";
-import { motion, AnimatePresence } from "framer-motion";
-// motion still used for TalkingTimer, explore pills entrance, error msgs, tooltip
-// AnimatePresence still used for tooltip
+import { motion } from "framer-motion";
 import {
   ExchangeMessage,
   renderRichContent,
   type UnifiedExchange,
 } from "./ExchangeMessage";
-import { ToolResultRenderer, isDrawerTool, parseStreamToSegments, type ToolCallData } from "./ToolRenderers";
+import { ToolResultRenderer, isDrawerTool, parseStreamToSegments, reorderToolsAfterText, type ToolCallData } from "./ToolRenderers";
 import dynamic from "next/dynamic";
 const KnowledgeDrawer = dynamic(
   () => import("./KnowledgeDrawer").then((m) => m.KnowledgeDrawer),
@@ -114,33 +112,34 @@ function TalkingTimer({
 
 /* --- Timestamp hover tooltip --- */
 
-/** Enhanced timestamp hover card with storyboard thumbnail and transcript context. Click to seek. */
+/**
+ * Timestamp hover tooltip. Positioned directly above the trigger button via portal.
+ * pointer-events: none — disappears the instant the mouse leaves the timestamp.
+ * No timers, no debounce, no lingering.
+ */
 function TimestampTooltip({
   seconds,
   segments,
   position,
   storyboardLevels,
-  onSeek,
-  onClose,
+  citeLabel,
+  citeContext,
 }: {
   seconds: number;
   segments: TranscriptSegment[];
   position: { x: number; y: number };
   storyboardLevels?: StoryboardLevel[];
-  onSeek: (seconds: number) => void;
-  onClose: () => void;
+  citeLabel?: string;
+  citeContext?: string;
 }) {
-  // Binary search for nearest segments (O(log n) vs O(n log n) sort)
+  // Find nearest segment for fallback text
   let lo = 0, hi = segments.length - 1;
   while (lo <= hi) {
     const mid = (lo + hi) >> 1;
     if (segments[mid].offset < seconds) lo = mid + 1;
     else hi = mid - 1;
   }
-  const start = Math.max(0, lo - 1);
-  const nearby = segments.slice(start, start + 3);
-
-  if (nearby.length === 0) return null;
+  const nearestText = segments[Math.max(0, lo - 1)]?.text || '';
 
   const formatTs = (s: number) => {
     const m = Math.floor(s / 60);
@@ -148,86 +147,91 @@ function TimestampTooltip({
     return `${m}:${sec.toString().padStart(2, "0")}`;
   };
 
-  // Pick a larger storyboard level if available (L2 for 320px-wide card)
   const preferLevel = storyboardLevels && storyboardLevels.length > 2 ? 2 : 1;
   const frame = storyboardLevels && storyboardLevels.length > 0
     ? getStoryboardFrame(storyboardLevels, seconds, preferLevel)
     : null;
 
-  // Clamp position to viewport edges
-  const clampedX = Math.max(170, Math.min(position.x, window.innerWidth - 170));
+  const thumbW = 130;
+  const clampedX = Math.max(180, Math.min(position.x, window.innerWidth - 180));
 
   return createPortal(
-    <motion.div
-      initial={{ opacity: 0, y: 4, scale: 0.97 }}
-      animate={{ opacity: 1, y: 0, scale: 1 }}
-      exit={{ opacity: 0, y: 4, scale: 0.97 }}
-      transition={{ type: "spring", damping: 25, stiffness: 400 }}
-      className="fixed z-[9999] bg-chalk-surface/95 backdrop-blur-md border border-chalk-border/60 rounded-xl overflow-hidden max-w-[280px] w-[280px] shadow-2xl shadow-black/40 pointer-events-auto cursor-pointer hover:border-chalk-accent/40 transition-colors"
+    <div
+      className="fixed z-[9999] pointer-events-none"
       style={{
         left: clampedX,
         top: position.y - 8,
-        transform: "translate(-50%, -100%)",
+        transform: 'translate(-50%, -100%)',
       }}
-      onClick={() => { onSeek(seconds); onClose(); }}
-      onMouseEnter={(e) => e.stopPropagation()}
-      onMouseLeave={() => onClose()}
     >
-      {/* Storyboard thumbnail */}
-      {frame && (() => {
-        // Scale sprite sheet so one frame fills the 280px container width
-        const containerW = 280;
-        const scale = containerW / frame.width;
-        const level = storyboardLevels?.[Math.min(preferLevel, (storyboardLevels?.length ?? 1) - 1)];
-        const cols = level?.cols ?? 5;
-        const rows = level?.rows ?? 5;
-        // Parse original position and scale it
-        const posMatch = frame.backgroundPosition.match(/-?(\d+)(?:px)?\s+-?(\d+)/);
-        const origX = posMatch ? parseInt(posMatch[1]) : 0;
-        const origY = posMatch ? parseInt(posMatch[2]) : 0;
-        return (
-        <div className="relative w-full overflow-hidden" style={{ height: Math.round(frame.height * scale) }}>
-          <div
-            className="w-full h-full"
-            style={{
-              backgroundImage: `url(${frame.url})`,
-              backgroundPosition: `-${Math.round(origX * scale)}px -${Math.round(origY * scale)}px`,
-              backgroundSize: `${Math.round(frame.width * cols * scale)}px ${Math.round(frame.height * rows * scale)}px`,
-              backgroundRepeat: 'no-repeat',
-            }}
-          />
-          {/* Gradient overlay from image to content */}
-          <div className="absolute inset-x-0 bottom-0 h-6 bg-gradient-to-t from-chalk-surface/95 to-transparent" />
-          {/* Timestamp badge */}
-          <span className="absolute top-2 left-2 bg-black/70 text-white text-[10px] font-mono px-1.5 py-0.5 rounded">
-            {formatTs(seconds)}
-          </span>
-        </div>
-        );
-      })()}
-
-      {/* Transcript context */}
-      <div className={`px-3 ${frame ? 'py-1.5' : 'py-2'} space-y-0.5`}>
-        {!frame && (
-          <span className="text-[10px] font-mono text-chalk-accent mb-1 block">
-            {formatTs(seconds)}
-          </span>
-        )}
-        {nearby.map((seg, i) => {
-          const isExact = Math.abs(seg.offset - seconds) < 3;
+      <div
+        className="bg-chalk-surface/95 backdrop-blur-md border border-chalk-border/60 rounded-lg overflow-hidden shadow-2xl shadow-black/40 flex"
+        style={{ width: frame ? 340 : 220 }}
+      >
+        {/* Storyboard thumbnail */}
+        {frame && (() => {
+          const level = storyboardLevels?.[Math.min(preferLevel, (storyboardLevels?.length ?? 1) - 1)];
+          const cols = level?.cols ?? 5;
+          const rows = level?.rows ?? 5;
+          const scale = thumbW / frame.width;
+          const thumbH = Math.round(frame.height * scale);
+          const posMatch = frame.backgroundPosition.match(/-?(\d+)(?:px)?\s+-?(\d+)/);
+          const origX = posMatch ? parseInt(posMatch[1]) : 0;
+          const origY = posMatch ? parseInt(posMatch[2]) : 0;
           return (
-            <div
-              key={i}
-              className={`text-[11px] leading-snug ${isExact ? "text-chalk-text" : "text-slate-500"}`}
-            >
-              {seg.text}
+            <div className="relative flex-shrink-0 overflow-hidden" style={{ width: thumbW, height: thumbH }}>
+              <div
+                className="w-full h-full"
+                style={{
+                  backgroundImage: `url(${frame.url})`,
+                  backgroundPosition: `-${Math.round(origX * scale)}px -${Math.round(origY * scale)}px`,
+                  backgroundSize: `${Math.round(frame.width * cols * scale)}px ${Math.round(frame.height * rows * scale)}px`,
+                  backgroundRepeat: 'no-repeat',
+                }}
+              />
+              <span className="absolute bottom-1 left-1 bg-black/80 text-white text-[10px] font-mono px-1 py-0.5 rounded">
+                {formatTs(seconds)}
+              </span>
             </div>
           );
-        })}
+        })()}
+
+        {/* Info panel */}
+        <div className="flex-1 min-w-0 p-2.5 flex flex-col justify-center">
+          {citeLabel ? (
+            <>
+              <div className="text-[12px] font-medium text-slate-200 leading-tight truncate">{citeLabel}</div>
+              {citeContext && (
+                <div className="text-[10px] text-slate-400 leading-snug mt-0.5 line-clamp-2">{citeContext}</div>
+              )}
+            </>
+          ) : (
+            <>
+              {!frame && (
+                <span className="text-[11px] font-mono text-chalk-accent mb-0.5">{formatTs(seconds)}</span>
+              )}
+              <div className="text-[11px] text-slate-400 leading-snug line-clamp-2">{nearestText}</div>
+            </>
+          )}
+        </div>
       </div>
-    </motion.div>,
+    </div>,
     document.body,
   );
+}
+
+/* --- Fingerprint helper for deduplicating drawer tool calls --- */
+
+function toolFingerprint(tc: ToolCallData): string {
+  const r = tc.result;
+  switch (r.type) {
+    case 'reference_video': return `ref:${r.video_id}`;
+    case 'learning_path': return `lp:${r.from_concept}->${r.to_concept}`;
+    case 'quiz': return `quiz:${r.questions.length}:${r.questions[0]?.question?.slice(0, 30)}`;
+    case 'alternative_explanations': return `alt:${r.concept}`;
+    case 'prerequisite_chain': return `prereq:${r.concept_id}`;
+    default: return `${r.type}:${JSON.stringify(r).slice(0, 50)}`;
+  }
 }
 
 /* --- MessagePanel --- */
@@ -273,6 +277,7 @@ export interface MessagePanelProps {
   playingMessageId: string | null;
   onPlayMessage: (id: string, text: string) => void;
   isReadAloudLoading: boolean;
+  readAloudProgress: number;
 
   // Explore pill selection
   handlePillSelect: (option: string) => void;
@@ -296,6 +301,9 @@ export interface MessagePanelProps {
 
   // Clear conversation
   onClearHistory?: () => void;
+
+  /** Ref bridge for 3-level Escape stacking */
+  drawerRef?: React.RefObject<{ isOpen: boolean; dismiss: () => void } | null>;
 }
 
 export function MessagePanel({
@@ -326,6 +334,7 @@ export function MessagePanel({
   playingMessageId,
   onPlayMessage,
   isReadAloudLoading,
+  readAloudProgress,
   handlePillSelect,
   focusInput,
   learnState,
@@ -335,17 +344,38 @@ export function MessagePanel({
   storyboardLevels,
   inVideoEntry,
   onCloseInVideo,
+  drawerRef,
 }: MessagePanelProps) {
   const [canScrollDown, setCanScrollDown] = useState(false);
   const [drawerDismissed, setDrawerDismissed] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // Timestamp tooltip state with debounced close
+  // Delayed unmount for InVideoPanel — gives Vidstack time to tear down its
+  // YouTube provider before React removes the component from the tree.
+  const lastInVideoEntryRef = useRef<SideVideoEntry | null>(null);
+  const [deferredInVideoEntry, setDeferredInVideoEntry] = useState<SideVideoEntry | null>(null);
+
+  useEffect(() => {
+    if (inVideoEntry) {
+      lastInVideoEntryRef.current = inVideoEntry;
+      setDeferredInVideoEntry(inVideoEntry);
+    } else if (lastInVideoEntryRef.current) {
+      // Keep rendering during close animation, then unmount
+      const timer = setTimeout(() => {
+        lastInVideoEntryRef.current = null;
+        setDeferredInVideoEntry(null);
+      }, 350); // slightly longer than the 300ms CSS width transition
+      return () => clearTimeout(timer);
+    }
+  }, [inVideoEntry]);
+
+  // Timestamp tooltip state — no timers, instant show/hide
   const [tooltipInfo, setTooltipInfo] = useState<{
     seconds: number;
     position: { x: number; y: number };
+    citeLabel?: string;
+    citeContext?: string;
   } | null>(null);
-  const tooltipCloseTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   const handleTimestampSeek = useCallback(
     (seconds: number) => {
@@ -356,20 +386,21 @@ export function MessagePanel({
   );
 
   const isLearnModeActive = learnState.phase !== "idle";
-
-  // Reset drawer dismissed state when new streaming starts
-  useEffect(() => {
-    if (isTextStreaming) {
-      setDrawerDismissed(false);
-    }
-  }, [isTextStreaming]);
+  const prevDrawerCountRef = useRef(0);
 
   // === Knowledge Drawer state derivation ===
-  // Accumulate ALL drawer-worthy tool calls from ALL exchanges, grouped by exchange
+  // Accumulate ALL drawer-worthy tool calls from ALL exchanges, grouped by exchange (deduped)
   const exchangeGroups: DrawerExchangeGroup[] = useMemo(() => {
     const groups: DrawerExchangeGroup[] = [];
+    const seen = new Set<string>();
     for (const ex of exchanges) {
-      const drawerTools = ex.toolCalls?.filter(tc => isDrawerTool(tc)) ?? [];
+      const drawerTools = (ex.toolCalls?.filter(tc => isDrawerTool(tc)) ?? [])
+        .filter(tc => {
+          const fp = toolFingerprint(tc);
+          if (seen.has(fp)) return false;
+          seen.add(fp);
+          return true;
+        });
       if (drawerTools.length > 0) {
         groups.push({
           exchangeId: ex.id,
@@ -392,14 +423,32 @@ export function MessagePanel({
     [exchangeGroups, streamingDrawerCalls],
   );
 
+  // Reopen drawer only when NEW drawer items arrive (not on every stream start)
+  useEffect(() => {
+    if (totalDrawerCount > prevDrawerCountRef.current) {
+      setDrawerDismissed(false);
+    }
+    prevDrawerCountRef.current = totalDrawerCount;
+  }, [totalDrawerCount]);
+
   // Memoize streaming segment parsing to avoid O(n^2) re-parse on each char
   const streamSegments = useMemo(
-    () => currentRawAiText ? parseStreamToSegments(currentRawAiText) : [],
+    () => currentRawAiText ? reorderToolsAfterText(parseStreamToSegments(currentRawAiText)) : [],
     [currentRawAiText],
   );
 
   // Drawer is open when there are any accumulated tools or streaming tools
-  const isDrawerOpen = totalDrawerCount > 0 && !currentUserText && !drawerDismissed;
+  const isDrawerOpen = totalDrawerCount > 0 && !drawerDismissed;
+
+  // Sync drawer state to parent ref for 3-level Escape stacking
+  useEffect(() => {
+    if (drawerRef) {
+      (drawerRef as React.MutableRefObject<{ isOpen: boolean; dismiss: () => void } | null>).current = {
+        isOpen: isDrawerOpen,
+        dismiss: () => setDrawerDismissed(true),
+      };
+    }
+  }, [drawerRef, isDrawerOpen]);
 
   // Auto-scroll
   const scrollToBottom = useCallback((smooth = false) => {
@@ -419,9 +468,17 @@ export function MessagePanel({
   }, [
     exchanges,
     currentAiText,
+    currentUserText,
     scrollToBottom,
     canScrollDown,
   ]);
+
+  // Always scroll to bottom when user sends a message
+  useEffect(() => {
+    if (currentUserText) {
+      requestAnimationFrame(() => scrollToBottom());
+    }
+  }, [currentUserText, scrollToBottom]);
 
   // Always scroll to bottom when messages area expands
   useEffect(() => {
@@ -430,22 +487,28 @@ export function MessagePanel({
     }
   }, [expanded, scrollToBottom]);
 
+  // Auto-scroll when Explore mode toggles on/off
+  const prevExploreRef = useRef(exploreMode);
+  useEffect(() => {
+    if (exploreMode !== prevExploreRef.current) {
+      // Toggled ON: smooth scroll so user sees starting pills
+      // Toggled OFF: smooth scroll to show latest content cleanly
+      requestAnimationFrame(() => scrollToBottom(true));
+    }
+    prevExploreRef.current = exploreMode;
+  }, [exploreMode, scrollToBottom]);
+
   const handleScroll = useCallback(() => {
     if (!scrollRef.current) return;
     const { scrollTop, scrollHeight, clientHeight } = scrollRef.current;
     setCanScrollDown(scrollHeight - scrollTop - clientHeight > 60);
   }, []);
 
-  // Timestamp tooltip via event delegation with debounced close
+  // Timestamp tooltip via event delegation — instant show/hide, no debounce
   const handleMouseOver = useCallback((e: React.MouseEvent) => {
     const target = e.target as HTMLElement;
     const button = target.closest('button[aria-label^="Seek to"]');
     if (button) {
-      // Cancel any pending close
-      if (tooltipCloseTimer.current) {
-        clearTimeout(tooltipCloseTimer.current);
-        tooltipCloseTimer.current = undefined;
-      }
       const label = button.getAttribute("aria-label") || "";
       const match = label.match(/Seek to (\d+):(\d{2})(?::(\d{2}))? in video/);
       if (match) {
@@ -459,9 +522,13 @@ export function MessagePanel({
           seconds = parseInt(match[1]) * 60 + parseInt(match[2]);
         }
         const rect = button.getBoundingClientRect();
+        const citeLabel = button.getAttribute("data-cite-label") || undefined;
+        const citeContext = button.getAttribute("data-cite-context") || undefined;
         setTooltipInfo({
           seconds,
           position: { x: rect.left + rect.width / 2, y: rect.top },
+          citeLabel,
+          citeContext,
         });
       }
     }
@@ -471,15 +538,8 @@ export function MessagePanel({
     const target = e.target as HTMLElement;
     const button = target.closest('button[aria-label^="Seek to"]');
     if (button) {
-      // 200ms debounce so users can hover into the tooltip card
-      tooltipCloseTimer.current = setTimeout(() => {
-        setTooltipInfo(null);
-      }, 200);
+      setTooltipInfo(null);
     }
-  }, []);
-
-  const handleTooltipClose = useCallback(() => {
-    setTooltipInfo(null);
   }, []);
 
   return (
@@ -492,22 +552,27 @@ export function MessagePanel({
         {/* Mobile grip indicator for swipe-to-close */}
         <div className="flex-shrink-0 mx-auto mb-3 w-8 h-1 rounded-full pointer-events-auto md:hidden bg-white/20" />
 
-        {/* Messages + Knowledge Drawer — flex-row layout */}
+        {/* Messages + Knowledge Drawer — overlay layout (panels don't push chat) */}
         {hasContent && (
-          <div className="flex-1 w-full min-h-0 flex flex-row pointer-events-auto" data-message-panel>
-            {/* Knowledge Drawer — desktop only, LEFT side, disabled when side panel is open */}
-            <div className={`hidden md:flex flex-none overflow-hidden transition-[width,opacity] duration-300 ease-out ${
-              isDrawerOpen ? 'w-[320px] lg:w-[340px] opacity-100 border-r border-white/[0.06]' : 'w-0 opacity-0'
+          <div className="flex-1 w-full min-h-0 relative pointer-events-auto" data-message-panel>
+            {/* Knowledge Drawer — desktop only, LEFT side, absolute overlay */}
+            <div className={`hidden md:flex absolute top-0 left-0 h-full z-10 overflow-hidden transition-[width] duration-300 ease-out ${
+              isDrawerOpen ? 'w-[280px] border-r border-white/[0.10] bg-black/30 backdrop-blur-md shadow-[4px_0_16px_rgba(0,0,0,0.3)]' : 'w-0'
             }`}>
               {totalDrawerCount > 0 && (
-                <KnowledgeDrawer
-                  exchangeGroups={exchangeGroups}
-                  streamingCalls={streamingDrawerCalls}
-                  isStreaming={isTextStreaming && streamingDrawerCalls.length > 0}
-                  onSeek={handleTimestampSeek}
-                  onOpenVideo={onOpenVideo}
-                  onClose={() => setDrawerDismissed(true)}
-                />
+                <div className={`min-w-[280px] h-full transition-opacity duration-200 ease-out ${
+                  isDrawerOpen ? 'opacity-100 delay-150' : 'opacity-0'
+                }`}>
+                  <KnowledgeDrawer
+                    exchangeGroups={exchangeGroups}
+                    streamingCalls={streamingDrawerCalls}
+                    isStreaming={isTextStreaming && streamingDrawerCalls.length > 0}
+                    onSeek={handleTimestampSeek}
+                    onOpenVideo={onOpenVideo}
+                    onClose={() => setDrawerDismissed(true)}
+                    currentVideoId={videoId}
+                  />
+                </div>
               )}
             </div>
 
@@ -515,7 +580,7 @@ export function MessagePanel({
             {drawerDismissed && totalDrawerCount > 0 && (
               <button
                 onClick={() => setDrawerDismissed(false)}
-                className="hidden md:flex flex-none items-center justify-center w-8 border-r border-white/[0.06] text-slate-500 hover:text-slate-300 hover:bg-white/[0.04] transition-colors"
+                className="hidden md:flex absolute top-0 left-0 h-full z-10 items-center justify-center w-8 border-r border-white/[0.10] text-slate-500 hover:text-slate-300 hover:bg-white/[0.04] transition-colors"
                 title="Show related content"
               >
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -524,18 +589,15 @@ export function MessagePanel({
               </button>
             )}
 
-            {/* Chat column */}
+            {/* Chat column — full width, content centered, never moves */}
             <div
               ref={scrollRef}
               onScroll={handleScroll}
               onMouseOver={handleMouseOver}
               onMouseOut={handleMouseOut}
-              className={`flex-1 min-w-0 overflow-y-auto scroll-smooth flex flex-col gap-3 md:gap-4 px-3 py-3 md:py-4 [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none] transition-[max-width,padding] duration-300 ease-out ${
-                isDrawerOpen
-                  ? 'md:px-5'
-                  : 'md:max-w-3xl md:mx-auto md:px-4'
-              }`}
+              className="w-full h-full overflow-y-auto scroll-smooth [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]"
             >
+            <div className="flex flex-col gap-3 md:gap-4 px-3 py-3 md:py-4 md:px-4 w-full md:max-w-3xl md:mx-auto">
               {/* Unified conversation history -- all exchanges in chronological order */}
               {exchanges.map((exchange, i) => {
                 const justCommitted = i === exchanges.length - 1 && Date.now() - Number(exchange.id) < 500;
@@ -565,10 +627,6 @@ export function MessagePanel({
                   }
                 }
 
-                // Suppress drawer tools inline when the drawer is open (they render in the drawer instead)
-                const hasDrawerTools = exchange.toolCalls?.some(tc => isDrawerTool(tc)) ?? false;
-                const isActiveDrawerExchange = isDrawerOpen && hasDrawerTools;
-
                 return (
                   <React.Fragment key={exchange.id}>
                     {separator}
@@ -584,7 +642,9 @@ export function MessagePanel({
                         playingMessageId === exchange.id
                       }
                       onOpenVideo={onOpenVideo}
-                      suppressDrawerTools={isActiveDrawerExchange}
+                      readAloudProgress={
+                        playingMessageId === exchange.id ? readAloudProgress : 0
+                      }
                     />
                   </React.Fragment>
                 );
@@ -599,27 +659,43 @@ export function MessagePanel({
                   {(currentUserText ||
                     (!showExploreUI && voiceTranscript)) && (
                     <div className="flex justify-end w-full">
-                      <div className="max-w-[85%] px-3.5 py-2 rounded-lg bg-white/[0.10] border border-white/[0.12] text-white text-sm leading-relaxed break-words">
+                      <div className="max-w-[85%] px-3.5 py-2 rounded-lg bg-white/[0.10] backdrop-blur-sm border border-white/[0.12] text-white text-sm leading-relaxed break-words">
                         {currentUserText || voiceTranscript}
                       </div>
                     </div>
                   )}
-                  {/* Thinking timer — between user msg and AI response */}
-                  {showExploreUI && isTextStreaming && (isThinking || thinkingDuration !== null) && (
-                    <TalkingTimer isThinking={isThinking} thinkingDuration={thinkingDuration} />
+                  {/* Thinking/streaming indicator */}
+                  {isTextStreaming && !currentAiText && (
+                    showExploreUI && (isThinking || thinkingDuration !== null)
+                      ? <TalkingTimer isThinking={isThinking} thinkingDuration={thinkingDuration} />
+                      : !showExploreUI && (
+                        <div className="flex items-center gap-2 py-1">
+                          <div className="flex gap-1">
+                            <span className="w-1.5 h-1.5 rounded-full bg-chalk-accent/40 animate-pulse" />
+                            <span className="w-1.5 h-1.5 rounded-full bg-chalk-accent/40 animate-pulse [animation-delay:150ms]" />
+                            <span className="w-1.5 h-1.5 rounded-full bg-chalk-accent/40 animate-pulse [animation-delay:300ms]" />
+                          </div>
+                        </div>
+                      )
                   )}
                   {(currentAiText ||
                     (!showExploreUI && voiceResponseText)) && (
                     <div className="flex justify-start w-full">
                       <div className="max-w-[90%]">
                         <div className="text-[15px] text-slate-300 leading-relaxed whitespace-pre-wrap break-words">
-                          {!showExploreUI && currentRawAiText && currentToolCalls && currentToolCalls.length > 0 ? (
+                          {currentRawAiText && currentToolCalls && currentToolCalls.length > 0 ? (
                             // Segment-based rendering: route drawer tools to KnowledgeDrawer
                             <>
                               {streamSegments.map((seg, i) => {
                                 if (seg.type === 'text') {
                                   if (!seg.content.trim()) return null;
-                                  return <span key={`stream-seg-${i}`}>{renderRichContent(seg.content, handleTimestampSeek, videoId)}</span>;
+                                  // Trim trailing newlines if next segment is cite_moment so pill flows inline
+                                  let content = seg.content;
+                                  const next = streamSegments[i + 1];
+                                  if (next && next.type === 'tool' && next.toolCall.result.type === 'cite_moment') {
+                                    content = content.replace(/\s*\n+\s*$/, ' ');
+                                  }
+                                  return <span key={`stream-seg-${i}`}>{renderRichContent(content, handleTimestampSeek, videoId)}</span>;
                                 }
                                 if (seg.toolCall.result.type === 'cite_moment') {
                                   return (
@@ -628,17 +704,17 @@ export function MessagePanel({
                                       toolCall={seg.toolCall}
                                       onSeek={handleTimestampSeek}
                                       onOpenVideo={onOpenVideo}
+                                      currentVideoId={videoId}
                                     />
                                   );
                                 }
-                                // Drawer tools: skip inline when drawer is open (they render in the drawer)
-                                if (isDrawerOpen && isDrawerTool(seg.toolCall)) return null;
                                 return (
                                   <div key={`stream-tool-${i}`} className="my-2">
                                     <ToolResultRenderer
                                       toolCall={seg.toolCall}
                                       onSeek={handleTimestampSeek}
                                       onOpenVideo={onOpenVideo}
+                                      currentVideoId={videoId}
                                     />
                                   </div>
                                 );
@@ -696,7 +772,7 @@ export function MessagePanel({
                           }}
                           whileTap={{ scale: 0.97 }}
                           onClick={() => submitExploreMessage(label)}
-                          className="px-3 py-1.5 rounded-lg text-xs text-slate-300 bg-white/[0.04] border border-white/[0.08] hover:bg-white/[0.08] hover:border-white/[0.15] hover:text-white transition-colors"
+                          className="px-3 py-1.5 rounded-lg text-xs text-slate-300 bg-white/[0.04] backdrop-blur-sm border border-white/[0.08] hover:bg-white/[0.08] hover:border-white/[0.15] hover:text-white transition-colors"
                         >
                           {label}
                         </motion.button>
@@ -778,17 +854,22 @@ export function MessagePanel({
                 </button>
               </div>
             </div>
+            </div>
 
-            {/* InVideo Panel — desktop only, RIGHT side, mirrors drawer CSS pattern */}
-            <div className={`hidden md:flex flex-none overflow-hidden transition-[width,opacity] duration-300 ease-out ${
-              inVideoEntry ? 'w-[320px] lg:w-[340px] opacity-100 border-l border-white/[0.06]' : 'w-0 opacity-0'
+            {/* InVideo Panel — desktop only, RIGHT side, absolute overlay */}
+            <div className={`hidden md:flex absolute top-0 right-0 h-full z-10 overflow-hidden transition-[width] duration-300 ease-out ${
+              inVideoEntry ? 'w-[280px] border-l border-white/[0.10] bg-black/30 backdrop-blur-md shadow-[-4px_0_16px_rgba(0,0,0,0.3)]' : 'w-0'
             }`}>
-              {inVideoEntry && (
-                <InVideoPanel
-                  entry={inVideoEntry}
-                  onClose={onCloseInVideo ?? (() => {})}
-                  onOpenVideo={onOpenVideo}
-                />
+              {deferredInVideoEntry && (
+                <div className={`min-w-[280px] h-full transition-opacity duration-200 ease-out ${
+                  inVideoEntry ? 'opacity-100 delay-150' : 'opacity-0'
+                }`}>
+                  <InVideoPanel
+                    entry={deferredInVideoEntry}
+                    onClose={onCloseInVideo ?? (() => {})}
+                    onOpenVideo={onOpenVideo}
+                  />
+                </div>
               )}
             </div>
           </div>
@@ -796,19 +877,17 @@ export function MessagePanel({
 
       </div>
 
-      {/* Timestamp tooltip */}
-      <AnimatePresence>
-        {tooltipInfo && (
-          <TimestampTooltip
-            seconds={tooltipInfo.seconds}
-            segments={tooltipSegments}
-            position={tooltipInfo.position}
-            storyboardLevels={storyboardLevels}
-            onSeek={handleTimestampSeek}
-            onClose={handleTooltipClose}
-          />
-        )}
-      </AnimatePresence>
+      {/* Timestamp tooltip — pointer-events:none, disappears instantly on mouse leave */}
+      {tooltipInfo && (
+        <TimestampTooltip
+          seconds={tooltipInfo.seconds}
+          segments={tooltipSegments}
+          position={tooltipInfo.position}
+          storyboardLevels={storyboardLevels}
+          citeLabel={tooltipInfo.citeLabel}
+          citeContext={tooltipInfo.citeContext}
+        />
+      )}
     </>
   );
 }

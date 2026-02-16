@@ -22,7 +22,7 @@ import { ChalkboardSimple, Play, ArrowBendUpLeft, SpinnerGap, CheckCircle, Warni
 import { KaraokeCaption } from "@/components/KaraokeCaption";
 import { AppBar } from "@/components/AppBar";
 import { VoiceCloneConsent } from "@/components/VoiceCloneConsent";
-import type { MediaPlayerInstance } from "@vidstack/react";
+import type { PlayerHandle } from "@/components/VideoPlayer";
 
 import { useUnifiedMode } from "@/hooks/useUnifiedMode";
 import { useVoiceClone } from "@/hooks/useVoiceClone";
@@ -197,11 +197,12 @@ function WatchContent() {
       /* ignore */
     }
   }, [showTranscript]);
-  const playerRef = useRef<MediaPlayerInstance>(null);
+  const playerRef = useRef<PlayerHandle>(null);
   const progressSaveRef = useRef<ReturnType<typeof setInterval>>(undefined);
   const currentTimeRef = useRef(0);
   const segmentsRef = useRef(segments);
   const inputRef = useRef<HTMLElement>(null);
+  const drawerRef = useRef<{ isOpen: boolean; dismiss: () => void } | null>(null);
   const wasPlayingRef = useRef(false);
   const hasPlayedOnce = useRef(false);
   const wasPlayingBeforeVoice = useRef(false);
@@ -231,6 +232,9 @@ function WatchContent() {
         playerRef.current?.pause();
       } catch { /* Vidstack proxy may throw */ }
     } else if (prev === 'chatting' && phase === 'watching') {
+      // Stop any playing audio (TTS, read-aloud) when leaving chat
+      try { unified.stopPlayback(); } catch { /* ignore */ }
+      try { unified.stopReadAloud(); } catch { /* ignore */ }
       // Exiting to watching: resume if was playing
       if (wasPlayingRef.current) {
         try { playerRef.current?.play(); } catch { /* ignore */ }
@@ -378,18 +382,17 @@ function WatchContent() {
     return () => clearInterval(timer);
   }, [continueFrom]);
 
-  // Autoplay when arriving from Chrome extension (?autoplay=1)
+  // Autoplay fallback: if Vidstack's native autoPlay hasn't started within 1s, nudge it
   useEffect(() => {
     if (!shouldAutoplay || !playerRef.current) return;
-    const timer = setInterval(() => {
+    const timeout = setTimeout(() => {
       try {
-        if (playerRef.current && playerRef.current.duration > 0) {
+        if (playerRef.current && playerRef.current.paused && playerRef.current.duration > 0) {
           playerRef.current.play();
-          clearInterval(timer);
         }
       } catch { /* Vidstack proxy may throw during init */ }
-    }, 300);
-    return () => clearInterval(timer);
+    }, 1000);
+    return () => clearTimeout(timeout);
   }, [shouldAutoplay]);
 
   // Keyboard detection for mobile
@@ -434,7 +437,10 @@ function WatchContent() {
     try {
       if (playerRef.current) {
         playerRef.current.currentTime = seconds;
-        playerRef.current.play();
+        // Small delay so YouTube iframe registers the seek before play
+        requestAnimationFrame(() => {
+          try { playerRef.current?.play(); } catch { /* ignore */ }
+        });
       }
     } catch {
       /* Vidstack $state proxy may throw */
@@ -513,11 +519,15 @@ function WatchContent() {
       const isEditable = (e.target as HTMLElement)?.isContentEditable;
       const inInput = tag === "INPUT" || tag === "TEXTAREA" || isEditable;
 
-      // Escape: close InVideo panel first, then transition to watching
+      // Escape: 3-level stacking — InVideo panel → Knowledge Drawer → exit chatting
       if (e.key === "Escape") {
         e.preventDefault();
         if (inVideoEntry) {
           handleCloseInVideo();
+          return;
+        }
+        if (drawerRef.current?.isOpen) {
+          drawerRef.current.dismiss();
           return;
         }
         overlayDispatch({ type: 'ESCAPE' });
@@ -536,8 +546,19 @@ function WatchContent() {
         return;
       }
 
-      // Any printable character (no Ctrl/Meta/Alt): type-to-activate.
-      // No player keybinds — every keystroke goes to the chat input.
+      // Space: toggle play/pause only — no chat activation
+      if (e.key === " ") {
+        e.preventDefault();
+        try {
+          if (playerRef.current) {
+            if (playerRef.current.paused) playerRef.current.play();
+            else playerRef.current.pause();
+          }
+        } catch { /* player proxy may be invalid */ }
+        return;
+      }
+
+      // Any printable character except Space (no Ctrl/Meta/Alt): type-to-activate.
       // Player controls are accessible via the Vidstack UI (click to play/pause, scrub timeline, etc.)
       if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
         e.preventDefault();
@@ -669,7 +690,8 @@ function WatchContent() {
     playingMessageId: unified.playingMessageId,
     onPlay: unified.playMessage,
     isLoading: unified.isReadAloudLoading,
-  }), [unified.autoReadAloud, unified.setAutoReadAloud, unified.playingMessageId, unified.playMessage, unified.isReadAloudLoading]);
+    readAloudProgress: unified.readAloudProgress,
+  }), [unified.autoReadAloud, unified.setAutoReadAloud, unified.playingMessageId, unified.playMessage, unified.isReadAloudLoading, unified.readAloudProgress]);
 
   const inVideoValue = useMemo(() => ({
     entry: inVideoEntry,
@@ -719,7 +741,7 @@ function WatchContent() {
                       className="shrink-0 text-slate-600 hover:text-[#FF0000] transition-colors"
                       title="Open on YouTube"
                     >
-                      <svg width="12" height="9" viewBox="0 0 20 14" fill="currentColor">
+                      <svg width="15" height="11" viewBox="0 0 20 14" fill="currentColor">
                         <path d="M19.6 2.2A2.5 2.5 0 0 0 17.8.4C16.3 0 10 0 10 0S3.7 0 2.2.4A2.5 2.5 0 0 0 .4 2.2C0 3.7 0 7 0 7s0 3.3.4 4.8a2.5 2.5 0 0 0 1.8 1.8C3.7 14 10 14 10 14s6.3 0 7.8-.4a2.5 2.5 0 0 0 1.8-1.8C20 10.3 20 7 20 7s0-3.3-.4-4.8zM8 10V4l5.2 3L8 10z"/>
                       </svg>
                     </a>
@@ -729,10 +751,14 @@ function WatchContent() {
                   </span>
                 </div>
 
-                {/* Hint text */}
+                {/* Hint text — DEMO: 3B1B gets avatar + blue badge */}
                 {phase === 'watching' && effectiveChannel && (
-                  <span className="hidden lg:inline text-xs whitespace-nowrap pointer-events-none text-slate-500 shrink-0">
-                    Start typing to talk to {effectiveChannel}
+                  <span className="hidden lg:inline-flex items-center gap-1.5 text-xs whitespace-nowrap pointer-events-none text-slate-500 shrink-0">
+                    Start typing to talk to{' '}
+                    <span className="text-chalk-accent font-medium">{effectiveChannel}</span>
+                    {effectiveChannel === '3Blue1Brown' && (
+                      <img src="/demo/3b1b-avatar.jpg" alt="" className="w-4 h-4 rounded-full" />
+                    )}
                   </span>
                 )}
 
@@ -835,6 +861,7 @@ function WatchContent() {
                 <VideoPlayer
                   playerRef={playerRef}
                   videoId={videoId}
+                  autoPlay={shouldAutoplay}
                   onPause={handlePause}
                   onPlay={handlePlay}
                   onTimeUpdate={handleTimeUpdate}
@@ -939,6 +966,7 @@ function WatchContent() {
                           playbackSpeed={playbackSpeed}
                           onSetSpeed={handleSetSpeed}
                           hasTranscript={hasSegments}
+                          drawerRef={drawerRef}
                         />
                       </InVideoProvider>
                     </ReadAloudProvider>
@@ -950,7 +978,7 @@ function WatchContent() {
               {/* Video border — subtle white when playing, faint when paused */}
               <div
                 data-video-border
-                className={`hidden md:block absolute top-0 left-0 right-0 aspect-video max-h-[calc(100dvh-14rem)] rounded-xl border-[4px] pointer-events-none z-30 transition-colors duration-300 ease-out ${
+                className={`hidden md:block absolute top-0 left-0 right-0 aspect-video max-h-[calc(100dvh-14rem)] rounded-xl border-[4px] pointer-events-none z-[5] transition-colors duration-300 ease-out ${
                   isPaused ? 'border-white/[0.08]' : 'border-white/[0.25]'
                 }`}
               />

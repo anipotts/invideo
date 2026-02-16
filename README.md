@@ -2,6 +2,8 @@
 
 AI-powered YouTube video learning assistant built with Claude Opus 4.6.
 
+> **Note:** Most of our development was done in the [original repository (anipotts/chalk)](https://github.com/anipotts/chalk). We migrated here for a cleaner codebase after rebranding.
+
 Paste any YouTube URL, pause the video, and ask AI anything about what you're watching. InVideo transforms passive video consumption into active, AI-guided learning.
 
 ## Features
@@ -74,6 +76,11 @@ InVideo dynamically classifies each user question and allocates Opus 4.6's exten
 | Deep analysis | 10,240 tokens | "Compare this proof approach to the one in the linear algebra video" |
 
 This balances response quality with latency and cost.
+
+## Team
+
+- [Ani Potts](https://github.com/anipotts)
+- [Neel Jain](https://github.com/neelj230)
 
 ## License
 

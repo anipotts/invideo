@@ -93,7 +93,7 @@ export async function GET(req: Request) {
       .from('concept_mentions')
       .select('concept_id, mention_type')
       .eq('video_id', videoId)
-      .limit(15);
+      .limit(25);
 
     const mentionData = rawMentionData as Array<{ concept_id: string; mention_type: string }> | null;
 

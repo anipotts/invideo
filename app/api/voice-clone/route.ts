@@ -18,7 +18,7 @@ function cacheVoice(key: string, value: { voiceId: string; name: string }) {
     const firstKey = voiceCache.keys().next().value;
     if (firstKey) voiceCache.delete(firstKey);
   }
-  cacheVoice(key, value);
+  voiceCache.set(key, value);
 }
 
 export async function POST(req: Request) {

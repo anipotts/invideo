@@ -24,6 +24,36 @@
   text-decoration: none;
 }
 
-.invideo-yt-icon {
+/* Icon hover swap: ChalkboardSimple ↔ Chalkboard (matches ChalkIcon.tsx) */
+.invideo-icon-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
   flex-shrink: 0;
+}
+
+.invideo-icon-simple,
+.invideo-icon-full {
+  position: absolute;
+  inset: 0;
+  transition: opacity 150ms ease-out;
+}
+
+.invideo-icon-simple {
+  opacity: 1;
+}
+
+.invideo-icon-full {
+  opacity: 0;
+}
+
+.invideo-yt-btn:hover .invideo-icon-simple {
+  opacity: 0;
+}
+
+.invideo-yt-btn:hover .invideo-icon-full {
+  opacity: 1;
 }

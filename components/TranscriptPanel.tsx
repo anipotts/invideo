@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { formatTimestamp, type TranscriptSegment, type TranscriptSource } from '@/lib/video-utils';
+import { formatTimestamp, getSegmentDuration, computeWordTimings, type TranscriptSegment, type TranscriptSource } from '@/lib/video-utils';
 import type { TranscriptStatus, QueueProgress } from '@/hooks/useTranscriptStream';
 import { XCircle, Chats } from '@phosphor-icons/react';
 import { generateChapters } from '@/lib/chapters';
@@ -22,6 +22,62 @@ interface TranscriptPanelProps {
   videoId?: string;
   videoTitle?: string;
   queueProgress?: QueueProgress | null;
+}
+
+/** Inline karaoke word highlighting for the active transcript segment. */
+function KaraokeWords({
+  segment,
+  segments,
+  segIndex,
+  currentTime,
+}: {
+  segment: TranscriptSegment;
+  segments: TranscriptSegment[];
+  segIndex: number;
+  currentTime: number;
+}) {
+  const next = segIndex + 1 < segments.length ? segments[segIndex + 1] : undefined;
+  const duration = getSegmentDuration(segment, next);
+  const words = computeWordTimings(segment, duration);
+  if (words.length === 0) return <>{segment.text}</>;
+
+  const currentMs = currentTime * 1000;
+
+  // Find active word index
+  let activeWordIndex = -1;
+  for (let i = words.length - 1; i >= 0; i--) {
+    if (currentMs >= words[i].startMs) {
+      activeWordIndex = i;
+      break;
+    }
+  }
+
+  return (
+    <>
+      {words.map((wt, i) => {
+        const isActive = i === activeWordIndex;
+        const isSpoken = i < activeWordIndex;
+
+        // Color/weight only — no layout-shifting padding/bg
+        // Parent has text-chalk-text, so upcoming must override to be dimmer
+        let className: string;
+        if (isActive) {
+          className = 'text-white font-semibold';
+        } else if (isSpoken) {
+          className = 'text-chalk-text';
+        } else {
+          // Upcoming — noticeably dimmer than spoken
+          className = 'text-slate-500';
+        }
+
+        return (
+          <span key={`${segment.offset}-w-${i}`} className={className}>
+            {i > 0 ? ' ' : ''}{wt.text}
+          </span>
+        );
+      })}
+    </>
+  );
 }
 
 export function TranscriptPanel({
@@ -72,10 +128,13 @@ export function TranscriptPanel({
   }, [chapters]);
 
   // Auto-scroll to active segment
+  // InVideo variant: scroll active segment to top (compact panel, context below)
+  // All other variants: scroll to center (traditional transcript view)
   useEffect(() => {
     if (userScrolled || !activeRef.current || !scrollRef.current) return;
-    activeRef.current.scrollIntoView({ block: 'center', behavior: 'smooth' });
-  }, [activeIndex, userScrolled]);
+    const scrollBlock = variant === 'invideo' ? 'start' : 'center';
+    activeRef.current.scrollIntoView({ block: scrollBlock, behavior: 'smooth' });
+  }, [activeIndex, userScrolled, variant]);
 
   // Reset user-scrolled flag after 5s of inactivity
   useEffect(() => {
@@ -209,17 +268,20 @@ export function TranscriptPanel({
 
         {filteredSegments.map((seg, i) => {
           const isActive = !search && segments[activeIndex] === seg;
+          // Wave state: when not searching, determine if segment is spoken or upcoming
+          const isPast = !search && activeIndex >= 0 && !isActive && i < activeIndex;
+          const isFuture = !search && activeIndex >= 0 && !isActive && i > activeIndex;
           const segChapter = chapterOffsets.has(seg.offset) ? getChapterLabel(seg.offset) : null;
 
           return (
             <div key={`${seg.offset}-${i}`}>
               {/* Chapter divider */}
               {segChapter && (
-                <div className={isMobile ? 'px-3 pt-2 pb-0.5' : 'px-4 pt-4 pb-1'}>
-                  <div className="flex items-center gap-2">
-                    <div className="h-px flex-1 bg-chalk-border/30" />
-                    <span className="text-[10px] text-slate-500 font-medium shrink-0">{segChapter}</span>
-                    <div className="h-px flex-1 bg-chalk-border/30" />
+                <div className={isMobile ? 'px-3 pt-3 pb-0.5' : 'px-4 pt-5 pb-1.5'}>
+                  <div className="flex items-center gap-2.5">
+                    <div className="h-px flex-1 bg-chalk-border/20" />
+                    <span className="text-[10px] text-slate-500 font-medium tracking-wide uppercase shrink-0">{segChapter}</span>
+                    <div className="h-px flex-1 bg-chalk-border/20" />
                   </div>
                 </div>
               )}
@@ -236,31 +298,52 @@ export function TranscriptPanel({
                   }
                 }}
                 className={isInVideo
-                  ? `group flex gap-2 cursor-pointer transition-all duration-150 mx-2 my-0.5 px-2.5 py-1.5 rounded-lg ${
+                  ? `group flex gap-2 cursor-pointer transition-colors duration-300 mx-2 my-1 px-2.5 py-2 rounded-lg ${
                     isActive
                       ? 'bg-white/[0.12] border border-chalk-accent/30'
                       : 'bg-white/[0.06] border border-white/[0.08] hover:bg-white/[0.10] hover:border-white/[0.14]'
                   }`
-                  : `group flex gap-3 cursor-pointer transition-colors ${
+                  : `group flex gap-3 cursor-pointer transition-colors duration-300 ${
                     isMobile ? 'px-3 py-1 active:scale-[0.99]' : 'px-4 py-1.5'
                   } ${
                     isActive
-                      ? 'bg-chalk-accent/[0.08] border-l-2 border-l-chalk-accent'
-                      : 'border-l-2 border-l-transparent hover:bg-white/[0.03]'
+                      ? 'bg-chalk-accent/[0.10] border-l-2 border-l-chalk-accent'
+                      : 'border-l-2 border-l-transparent hover:bg-white/[0.04] hover:border-l-white/[0.12]'
                   }`
                 }
               >
-                <span className={`shrink-0 text-[10px] font-mono pt-0.5 ${
-                  isActive ? 'text-chalk-accent' : isInVideo ? 'text-slate-500' : 'text-slate-600'
+                <span className={`shrink-0 text-[10px] font-mono tabular-nums pt-0.5 select-none transition-colors duration-300 ${
+                  isActive
+                    ? 'text-chalk-accent font-medium'
+                    : isPast
+                      ? (isInVideo ? 'text-slate-400' : 'text-slate-500 group-hover:text-slate-400')
+                      : isFuture
+                        ? (isInVideo ? 'text-slate-600' : 'text-slate-700 group-hover:text-slate-600')
+                        : (isInVideo ? 'text-slate-500' : 'text-slate-600 group-hover:text-slate-500')
                 }`}>
                   {formatTimestamp(seg.offset)}
                 </span>
-                <span className={`${
+                <span className={`transition-colors duration-300 ${
                   isMobile ? 'text-[11px] leading-snug' : isInVideo ? 'text-[11px] leading-snug' : 'text-[12px] leading-relaxed'
                 } ${
-                  isActive ? 'text-chalk-text' : isInVideo ? 'text-slate-300' : 'text-slate-400'
+                  isActive
+                    ? 'text-chalk-text font-[450]'
+                    : isPast
+                      ? (isInVideo ? 'text-slate-200' : 'text-slate-300')
+                      : isFuture
+                        ? (isInVideo ? 'text-slate-500' : 'text-slate-600 group-hover:text-slate-500')
+                        : (isInVideo ? 'text-slate-300' : 'text-slate-400 group-hover:text-slate-300')
                 }`}>
-                  {search ? highlightMatch(seg.text, search) : seg.text}
+                  {isActive && !search ? (
+                    <KaraokeWords
+                      segment={seg}
+                      segments={segments}
+                      segIndex={i}
+                      currentTime={currentTime}
+                    />
+                  ) : (
+                    search ? highlightMatch(seg.text, search) : seg.text
+                  )}
                 </span>
                 {onAskAbout && !isMobile && !isInVideo && (
                   <button
@@ -293,7 +376,7 @@ function highlightMatch(text: string, query: string): React.ReactNode {
   return (
     <>
       {text.slice(0, idx)}
-      <mark className="bg-yellow-500/20 text-yellow-200 rounded-sm px-0.5">{text.slice(idx, idx + query.length)}</mark>
+      <mark className="bg-amber-400/25 text-amber-200 rounded-sm px-0.5">{text.slice(idx, idx + query.length)}</mark>
       {text.slice(idx + query.length)}
     </>
   );

@@ -66,6 +66,7 @@ interface UseUnifiedModeReturn {
   isReadAloudLoading: boolean;
   playMessage: (id: string, text: string) => void;
   stopReadAloud: () => void;
+  readAloudProgress: number;
 
   // Unified history
   exchanges: UnifiedExchange[];
@@ -102,6 +103,10 @@ function parseExploreOptions(text: string): [string, string[]] {
     .filter(Boolean);
   return [cleanText, options];
 }
+
+// DEMO ONLY — remove before committing
+const DEMO_GREETING = "Hmm, that is actually a really elegant way to think about it.";
+const DEMO_TRIGGER = "so its like each word gets to look around and decide which other words matter to it";
 
 const STORAGE_PREFIX = storageKey('interaction-history-');
 
@@ -279,6 +284,7 @@ export function useUnifiedMode({
           videoId,
           knowledgeContext: knowledgeContextRef.current,
           intervalSelection: intervalRef.current || undefined,
+          demoGreeting: text.trim().toLowerCase() === DEMO_TRIGGER ? DEMO_GREETING : undefined,
         }),
         signal: abortController.signal,
       });
@@ -402,6 +408,8 @@ export function useUnifiedMode({
           thinkingBudget: budget.budgetTokens,
           curriculumContext: curriculumContextRef.current || undefined,
           intervalSelection: intervalRef.current || undefined,
+          videoId,
+          knowledgeContext: knowledgeContextRef.current,
         }),
         signal: controller.signal,
       });
@@ -448,7 +456,12 @@ export function useUnifiedMode({
           const [stripped] = parseExploreOptions(cleaned);
           cleaned = stripped;
           cleaned = cleaned.replace(/<options>[^<]*$/, '').trimEnd();
-          setCurrentAiText(cleaned);
+
+          // Parse tool calls from the text portion
+          const { text: toolCleanText, toolCalls } = parseStreamWithToolCalls(cleaned);
+          setCurrentAiText(toolCleanText);
+          setCurrentRawAiText(cleaned);
+          if (toolCalls.length > 0) setCurrentToolCalls(toolCalls);
         } else {
           // Still in reasoning phase -- update thinking text
           setThinkingContent(reasoning || null);
@@ -463,22 +476,28 @@ export function useUnifiedMode({
         ? Date.now() - thinkingStartRef.current
         : null;
 
+      // Parse tool calls from the final text
+      const { text: toolFinalText, toolCalls: finalToolCalls } = parseStreamWithToolCalls(cleanText);
+
       // Add to unified exchanges
       const exchange: UnifiedExchange = {
         id: String(Date.now()),
         type: 'text',
         mode: 'explore',
         userText: text,
-        aiText: cleanText,
+        aiText: toolFinalText,
         timestamp: currentTimeRef.current,
         model: 'opus',
         thinking: finalReasoning || undefined,
         thinkingDuration: thinkDuration ?? undefined,
         explorePills: options.length > 0 ? options : undefined,
+        toolCalls: finalToolCalls.length > 0 ? finalToolCalls : undefined,
+        rawAiText: finalToolCalls.length > 0 ? cleanText : undefined,
       };
       setExchanges((prev) => [...prev, exchange]);
       setCurrentUserText('');
       setCurrentAiText('');
+      setCurrentRawAiText('');
       setCurrentToolCalls([]);
       setIsTextStreaming(false);
       setExplorePills(options);
@@ -540,6 +559,7 @@ export function useUnifiedMode({
     isReadAloudLoading: readAloud.isReadAloudLoading,
     playMessage: readAloud.playMessage,
     stopReadAloud: readAloud.stopReadAloud,
+    readAloudProgress: readAloud.readAloudProgress,
 
     // Unified
     exchanges,

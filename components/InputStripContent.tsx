@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useRef, useEffect, useCallback, type RefObject } from "react";
+import { createPortal } from "react-dom";
 import { motion } from "framer-motion";
 import { TextInput } from "./TextInput";
 import type { UnifiedExchange } from "./ExchangeMessage";
@@ -38,21 +39,103 @@ function SettingsDropdown({
   captionsDisabled?: boolean;
 }) {
   const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState({ top: 0, left: 0 });
 
+  // Position the dropdown above the gear button
+  useEffect(() => {
+    if (!open || !buttonRef.current) return;
+    const rect = buttonRef.current.getBoundingClientRect();
+    setPos({ top: rect.top - 8, left: rect.left });
+  }, [open]);
+
+  // Close on click outside (check both button and portal dropdown)
   useEffect(() => {
     if (!open) return;
     function handleClick(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node))
-        setOpen(false);
+      const target = e.target as Node;
+      if (
+        buttonRef.current?.contains(target) ||
+        dropdownRef.current?.contains(target)
+      ) return;
+      setOpen(false);
     }
     document.addEventListener("mousedown", handleClick);
     return () => document.removeEventListener("mousedown", handleClick);
   }, [open]);
 
+  // Close on scroll (dropdown position would be stale)
+  useEffect(() => {
+    if (!open) return;
+    const handleScroll = () => setOpen(false);
+    window.addEventListener("scroll", handleScroll, true);
+    return () => window.removeEventListener("scroll", handleScroll, true);
+  }, [open]);
+
+  const dropdown = open ? createPortal(
+    <div
+      ref={dropdownRef}
+      className="fixed w-44 rounded-xl border shadow-xl bg-[#0a0a0a] border-chalk-border/50 shadow-black/70 z-[9999] overflow-hidden"
+      style={{ top: pos.top, left: pos.left, transform: "translateY(-100%)" }}
+    >
+      <div className="p-1">
+        <button
+          onClick={() => {
+            if (!captionsDisabled) onToggleCaptions();
+          }}
+          className={`w-full text-left px-3 py-2 rounded-lg text-xs transition-colors flex items-center justify-between ${
+            captionsDisabled
+              ? "text-slate-600 cursor-not-allowed"
+              : showCaptions
+                ? "text-chalk-text bg-white/[0.06]"
+                : "text-slate-400 hover:text-chalk-text hover:bg-white/[0.04]"
+          }`}
+          disabled={captionsDisabled}
+        >
+          Captions
+          <span
+            className={`text-[10px] font-medium px-1.5 py-0.5 rounded ${
+              captionsDisabled
+                ? "text-slate-600"
+                : showCaptions
+                  ? "bg-chalk-accent/20 text-chalk-accent"
+                  : "text-slate-600"
+            }`}
+          >
+            {captionsDisabled ? "---" : showCaptions ? "ON" : "OFF"}
+          </span>
+        </button>
+        <div className="pt-1 mt-1 border-t border-chalk-border/20">
+          <div className="px-3 py-1 text-[10px] text-slate-600 font-medium">
+            Speed
+          </div>
+          {SPEED_PRESETS.map((s) => (
+            <button
+              key={s}
+              onClick={() => {
+                onSetSpeed(s);
+                setOpen(false);
+              }}
+              className={`w-full text-left px-3 py-1.5 rounded-lg text-xs transition-colors ${
+                speed === s
+                  ? "bg-white/[0.08] text-chalk-text font-medium"
+                  : "text-slate-400 hover:text-chalk-text hover:bg-white/[0.04]"
+              }`}
+            >
+              {s}x{s === 1 ? " (Normal)" : ""}
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>,
+    document.body,
+  ) : null;
+
   return (
-    <div ref={ref} className="relative">
+    <div className="relative">
       <button
+        ref={buttonRef}
         onClick={() => setOpen(!open)}
         className="flex items-center justify-center transition-colors flex-shrink-0 text-slate-600 hover:text-slate-400"
         title="Settings"
@@ -60,59 +143,7 @@ function SettingsDropdown({
       >
         <GearSix size={14} />
       </button>
-      {open && (
-        <div className="absolute bottom-full mb-2 left-0 w-44 rounded-xl border shadow-xl bg-[#0a0a0a] border-chalk-border/50 shadow-black/70 z-50 overflow-hidden">
-          <div className="p-1">
-            <button
-              onClick={() => {
-                if (!captionsDisabled) onToggleCaptions();
-              }}
-              className={`w-full text-left px-3 py-2 rounded-lg text-xs transition-colors flex items-center justify-between ${
-                captionsDisabled
-                  ? "text-slate-600 cursor-not-allowed"
-                  : showCaptions
-                    ? "text-chalk-text bg-white/[0.06]"
-                    : "text-slate-400 hover:text-chalk-text hover:bg-white/[0.04]"
-              }`}
-              disabled={captionsDisabled}
-            >
-              Captions
-              <span
-                className={`text-[10px] font-medium px-1.5 py-0.5 rounded ${
-                  captionsDisabled
-                    ? "text-slate-600"
-                    : showCaptions
-                      ? "bg-chalk-accent/20 text-chalk-accent"
-                      : "text-slate-600"
-                }`}
-              >
-                {captionsDisabled ? "---" : showCaptions ? "ON" : "OFF"}
-              </span>
-            </button>
-            <div className="pt-1 mt-1 border-t border-chalk-border/20">
-              <div className="px-3 py-1 text-[10px] text-slate-600 font-medium">
-                Speed
-              </div>
-              {SPEED_PRESETS.map((s) => (
-                <button
-                  key={s}
-                  onClick={() => {
-                    onSetSpeed(s);
-                    setOpen(false);
-                  }}
-                  className={`w-full text-left px-3 py-1.5 rounded-lg text-xs transition-colors ${
-                    speed === s
-                      ? "bg-white/[0.08] text-chalk-text font-medium"
-                      : "text-slate-400 hover:text-chalk-text hover:bg-white/[0.04]"
-                  }`}
-                >
-                  {s}x{s === 1 ? " (Normal)" : ""}
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
+      {dropdown}
     </div>
   );
 }

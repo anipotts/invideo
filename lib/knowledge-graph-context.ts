@@ -58,14 +58,14 @@ export function buildKnowledgeGraphPromptContext(ctx: KnowledgeContext): string 
 
   if (ctx.concept_connections.length > 0) {
     xml += '<concept_connections>\n';
-    xml += 'Key concepts from this video appear in other videos (use search_knowledge for more):\n';
+    xml += 'Concepts from this video. Use the concept_id when calling get_prerequisites, explain_differently, or get_learning_path:\n';
     for (const c of ctx.concept_connections) {
       const mentionLabel = c.mention_type !== 'references' ? ` [${c.mention_type}]` : '';
       const vids = c.videos.slice(0, 3).map(v => {
         const vMention = v.mention_type !== 'references' ? ` (${v.mention_type})` : '';
         return `"${v.title}" by ${v.channel_name || 'Unknown'}${vMention}`;
       }).join(', ');
-      xml += `- ${c.display_name}${mentionLabel}: also covered in ${vids}\n`;
+      xml += `- ${c.display_name} (concept_id: "${c.concept}")${mentionLabel}: also covered in ${vids}\n`;
     }
     xml += '</concept_connections>\n';
   }

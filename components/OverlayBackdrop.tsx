@@ -6,6 +6,10 @@ import { useId } from "react";
  * Glassmorphic grain backdrop — displaces video pixels through fractal noise,
  * creating a distinctive grainy/color-shifted glass effect.
  *
+ * Two layers:
+ * 1. Dark scrim — always visible when overlay is up (bg-black/40)
+ * 2. Grain displacement — fades in only when grainActive (500ms transition)
+ *
  * Optimized for our binary state machine (watching <-> chatting):
  * - Video is PAUSED when chatting -> backdrop content is static -> filter computes once
  * - Fixed filter params (no dynamic recalculation)
@@ -13,7 +17,15 @@ import { useId } from "react";
  * - `will-change` hint for GPU compositing
  */
 
-export function OverlayBackdrop({ visible, onClick }: { visible: boolean; onClick: () => void }) {
+export function OverlayBackdrop({
+  visible,
+  onClick,
+  grainActive = true,
+}: {
+  visible: boolean;
+  onClick: () => void;
+  grainActive?: boolean;
+}) {
   const filterId = useId();
 
   return (
@@ -22,6 +34,14 @@ export function OverlayBackdrop({ visible, onClick }: { visible: boolean; onClic
       onClick={onClick}
       data-overlay-backdrop
     >
+      {/* Layer 1: Gradient fade — transparent top, dark bottom for chat readability */}
+      <div
+        className="absolute inset-0"
+        style={{
+          background: 'linear-gradient(to bottom, rgba(0,0,0,0.08) 0%, rgba(0,0,0,0.25) 30%, rgba(0,0,0,0.55) 70%, rgba(0,0,0,0.75) 100%)',
+        }}
+      />
+
       {/* SVG displacement filter definition (0x0, purely declarative) */}
       <svg width="0" height="0" className="absolute" aria-hidden="true">
         <defs>
@@ -46,28 +66,28 @@ export function OverlayBackdrop({ visible, onClick }: { visible: boolean; onClic
             <feDisplacementMap
               in="SourceGraphic"
               in2="noise"
-              scale="28"
+              scale="35"
               xChannelSelector="R"
               yChannelSelector="G"
               result="displaced"
             />
             {/* Warm color transfer for chalky grain */}
             <feComponentTransfer in="displaced">
-              <feFuncR type="linear" slope="0.38" />
-              <feFuncG type="linear" slope="0.34" />
-              <feFuncB type="linear" slope="0.42" />
+              <feFuncR type="linear" slope="0.42" />
+              <feFuncG type="linear" slope="0.38" />
+              <feFuncB type="linear" slope="0.46" />
             </feComponentTransfer>
           </filter>
         </defs>
       </svg>
 
-      {/* Grain displacement layer — applies SVG filter to video underneath */}
+      {/* Layer 2: Grain displacement — fades in when grainActive */}
       <div
-        className="absolute inset-0"
+        className={`absolute inset-0 transition-opacity duration-500 ease-in-out ${grainActive ? 'opacity-100' : 'opacity-0'}`}
         style={{
           backdropFilter: `url(#${filterId})`,
           WebkitBackdropFilter: `url(#${filterId})`,
-          willChange: visible ? 'backdrop-filter' : 'auto',
+          willChange: visible && grainActive ? 'backdrop-filter' : 'auto',
         }}
       />
     </div>

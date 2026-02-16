@@ -1,9 +1,9 @@
 'use client';
 
-import { useState, useMemo } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { motion } from 'framer-motion';
 import { formatTimestamp } from '@/lib/video-utils';
-import { type ToolCallData, type ReferenceVideoResult, type CiteMomentResult, type ToolResult } from './ToolRenderers';
+import { type ToolCallData, type ReferenceVideoResult, type CiteMomentResult, type PrerequisiteChainResult, type QuizResult, type AlternativeExplanationsResult, type LearningPathResult, type ToolResult, approachLabels } from './ToolRenderers';
 import { ChalkIcon } from './ChalkIcon';
 import { CircleNotch, X, CaretDown, CaretRight, ArrowSquareOut } from '@phosphor-icons/react';
 import type { UnifiedExchange } from './ExchangeMessage';
@@ -12,12 +12,11 @@ import type { UnifiedExchange } from './ExchangeMessage';
 const CATEGORY_LABELS: Record<string, string> = {
   reference_video: 'Videos',
   cite_moment: 'Timestamps',
-  search_results: 'Search',
-  prerequisite_chain: 'Prerequisites',
+  prerequisite_chain: 'Foundations',
   quiz: 'Quiz',
   chapter_context: 'Chapter',
-  alternative_explanations: 'Alternatives',
-  learning_path: 'Path',
+  alternative_explanations: 'Other Explanations',
+  learning_path: 'Learning Path',
 };
 
 function getCategoryLabel(type: string): string {
@@ -51,6 +50,7 @@ interface KnowledgeDrawerProps {
   onSeek: (seconds: number) => void;
   onOpenVideo?: (videoId: string, title: string, channelName: string, seekTo?: number) => void;
   onClose?: () => void;
+  currentVideoId?: string;
 }
 
 function LoadingSkeleton() {
@@ -73,9 +73,13 @@ function LoadingSkeleton() {
 function CompactVideoCard({
   result,
   onOpenVideo,
+  currentVideoId,
+  onSeek,
 }: {
   result: ReferenceVideoResult;
   onOpenVideo?: (videoId: string, title: string, channelName: string, seekTo?: number) => void;
+  currentVideoId?: string;
+  onSeek?: (seconds: number) => void;
 }) {
   const badge = result.relationship
     ? (result.relationship === 'prerequisite' ? 'Prereq'
@@ -86,10 +90,18 @@ function CompactVideoCard({
       : result.relationship.charAt(0).toUpperCase() + result.relationship.slice(1))
     : 'Related';
 
+  const handleClick = () => {
+    if (currentVideoId && result.video_id === currentVideoId && result.timestamp_seconds != null && onSeek) {
+      onSeek(result.timestamp_seconds);
+      return;
+    }
+    onOpenVideo?.(result.video_id, result.video_title, result.channel_name, result.timestamp_seconds ?? undefined);
+  };
+
   return (
     <div
-      onClick={() => onOpenVideo?.(result.video_id, result.video_title, result.channel_name, result.timestamp_seconds ?? undefined)}
-      className="group flex gap-2.5 p-2 rounded-lg bg-white/[0.03] hover:bg-white/[0.06] border border-white/[0.06] hover:border-white/[0.12] cursor-pointer transition-all duration-150"
+      onClick={handleClick}
+      className="group flex gap-2.5 p-2 rounded-lg bg-white/[0.03] backdrop-blur-sm hover:bg-white/[0.06] border border-white/[0.06] hover:border-white/[0.12] cursor-pointer transition-all duration-150"
     >
       {/* Thumbnail — small horizontal */}
       <div className="flex-shrink-0 w-[72px] aspect-video rounded overflow-hidden bg-chalk-border/50 relative">
@@ -107,14 +119,19 @@ function CompactVideoCard({
         )}
       </div>
 
-      {/* Text — title + channel */}
+      {/* Text — title + channel + shared concepts */}
       <div className="flex-1 min-w-0 flex flex-col justify-center">
         <div className="text-[12px] text-slate-200 leading-tight line-clamp-2">{result.video_title}</div>
         <div className="flex items-center gap-1 mt-0.5">
           <span className="text-[10px] text-slate-500 truncate">{result.channel_name}</span>
           <span className="text-[10px] text-slate-600">&middot;</span>
-          <span className="text-[10px] text-chalk-accent/70">{badge}</span>
+          <span className="text-[9px] px-1 py-0.5 rounded bg-chalk-accent/8 text-chalk-accent/80">{badge}</span>
         </div>
+        {result.shared_concepts && result.shared_concepts.length > 0 && (
+          <div className="text-[9px] text-slate-500 truncate mt-0.5">
+            {result.shared_concepts.slice(0, 3).join(', ')}
+          </div>
+        )}
       </div>
 
       {/* Actions */}
@@ -169,24 +186,356 @@ function CompactCitationPill({
   );
 }
 
-/** Type-safe summary for non-cite, non-video tool results */
+/** Type-safe summary for generic tool results */
 function DrawerResultSummary({ result }: { result: ToolResult }) {
   switch (result.type) {
-    case 'search_results':
-      return <span>Searched: <span className="text-slate-300">{result.query}</span></span>;
-    case 'prerequisite_chain':
-      return <span>{result.chain.length} prerequisites</span>;
-    case 'quiz':
-      return <span>{result.questions.length} questions</span>;
     case 'chapter_context':
       return <span>Chapter: {result.chapter?.title || 'Context'}</span>;
-    case 'alternative_explanations':
-      return <span>{result.alternatives.length} alternatives</span>;
-    case 'learning_path':
-      return <span>{result.steps.length} steps</span>;
     default:
       return null;
   }
+}
+
+/** Expanded prerequisite chain display */
+function DrawerPrerequisiteList({
+  result,
+  onOpenVideo,
+}: {
+  result: PrerequisiteChainResult;
+  onOpenVideo?: (videoId: string, title: string, channelName: string, seekTo?: number) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const items = result.chain;
+  const visible = expanded ? items : items.slice(0, 5);
+  const remaining = items.length - 5;
+
+  if (items.length === 0) {
+    return <span className="text-[11px] text-slate-500">{result.message || 'No prerequisites found'}</span>;
+  }
+
+  // Group by depth for tree rendering
+  const byDepth = new Map<number, typeof items>();
+  for (const item of visible) {
+    if (!byDepth.has(item.depth)) byDepth.set(item.depth, []);
+    byDepth.get(item.depth)!.push(item);
+  }
+  const sortedDepths = [...byDepth.entries()].sort((a, b) => a[0] - b[0]);
+
+  return (
+    <div className="space-y-0.5">
+      {sortedDepths.map(([depth, depthItems]) => (
+        <div key={depth} className="relative" style={{ paddingLeft: `${(depth - 1) * 12}px` }}>
+          {depth > 1 && (
+            <div className="absolute left-0 top-0 bottom-0 border-l border-chalk-accent/15" style={{ left: `${(depth - 2) * 12 + 5}px` }} />
+          )}
+          {depthItems.map((item, j) => {
+            const hasVideo = item.best_video_id && item.best_video_title;
+            return (
+              <div
+                key={`${item.concept_id}-${j}`}
+                className={`flex items-start gap-2 py-1.5 px-2 rounded-md backdrop-blur-sm ${hasVideo ? 'cursor-pointer hover:bg-white/[0.06]' : ''} transition-all duration-150 relative`}
+                onClick={() => hasVideo && onOpenVideo?.(item.best_video_id!, item.best_video_title!, '', undefined)}
+              >
+                {depth > 1 && (
+                  <div className="absolute border-t border-chalk-accent/15" style={{ left: '-7px', top: '12px', width: '7px' }} />
+                )}
+                <span className="text-[8px] font-mono text-chalk-accent/50 bg-chalk-accent/8 w-4 h-4 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5">
+                  {depth}
+                </span>
+                <div className="flex-1 min-w-0">
+                  <span className={`text-[11px] ${hasVideo ? 'text-chalk-accent' : 'text-slate-300'} leading-tight`}>
+                    {item.display_name}
+                  </span>
+                  {hasVideo && (
+                    <div className="text-[10px] text-slate-500 truncate mt-0.5">{item.best_video_title}</div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      ))}
+      {remaining > 0 && !expanded && (
+        <button
+          onClick={() => setExpanded(true)}
+          className="text-[10px] text-chalk-accent/70 hover:text-chalk-accent px-2 py-1 transition-colors"
+        >
+          +{remaining} more
+        </button>
+      )}
+    </div>
+  );
+}
+
+/** Expanded quiz summary display */
+function DrawerQuizSummary({
+  result,
+  onSeek,
+}: {
+  result: QuizResult;
+  onSeek: (seconds: number) => void;
+}) {
+  if (result.questions.length === 0) {
+    return <span className="text-[11px] text-slate-500">{result.message || 'No quiz questions'}</span>;
+  }
+
+  // Difficulty breakdown
+  const counts = { easy: 0, medium: 0, hard: 0 } as Record<string, number>;
+  for (const q of result.questions) counts[q.difficulty] = (counts[q.difficulty] || 0) + 1;
+  const diffParts = Object.entries(counts).filter(([, c]) => c > 0);
+
+  return (
+    <div className="space-y-1.5">
+      {/* Summary header */}
+      <div className="flex items-center gap-2 px-2 py-1">
+        <span className="text-[11px] text-slate-300">{result.questions.length}q</span>
+        <div className="flex items-center gap-1">
+          {diffParts.map(([d, c]) => (
+            <span key={d} className={`text-[9px] px-1 py-0.5 rounded ${
+              d === 'easy' ? 'bg-green-500/10 text-green-400' :
+              d === 'hard' ? 'bg-red-500/10 text-red-400' :
+              'bg-yellow-500/10 text-yellow-400'
+            }`}>{c} {d}</span>
+          ))}
+        </div>
+      </div>
+      {result.questions.map((q, i) => (
+        <div
+          key={i}
+          className="flex items-start gap-2 px-2 py-1.5 rounded-md bg-white/[0.03] backdrop-blur-sm border border-white/[0.06]"
+        >
+          <span className="text-[9px] font-mono text-slate-500 flex-shrink-0 mt-0.5">Q{i + 1}</span>
+          <div className="flex-1 min-w-0">
+            <div className="text-[11px] text-slate-300 leading-tight line-clamp-2">{q.question}</div>
+            <div className="flex items-center gap-1.5 mt-0.5">
+              {q.concept && <span className="text-[9px] text-slate-500 truncate max-w-[120px]">{q.concept}</span>}
+              {q.timestamp_seconds !== null && (
+                <button
+                  onClick={() => onSeek(q.timestamp_seconds!)}
+                  className="text-[9px] font-mono text-chalk-accent/60 hover:text-chalk-accent transition-colors"
+                >
+                  [{formatTimestamp(q.timestamp_seconds!)}]
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** Expanded alternative explanations display */
+function DrawerAlternativesList({
+  result,
+  onOpenVideo,
+}: {
+  result: AlternativeExplanationsResult;
+  onOpenVideo?: (videoId: string, title: string, channelName: string, seekTo?: number) => void;
+}) {
+  if (result.alternatives.length === 0) {
+    return <span className="text-[11px] text-slate-500">{result.message || 'No alternatives found'}</span>;
+  }
+
+  return (
+    <div className="space-y-1">
+      {/* Concept header */}
+      {result.concept && (
+        <div className="px-2 py-0.5 text-[10px] text-slate-400">
+          {result.alternatives.length} explanation{result.alternatives.length !== 1 ? 's' : ''} for <span className="text-slate-300">{result.concept}</span>
+        </div>
+      )}
+      {result.alternatives.slice(0, 5).map((alt, i) => (
+        <div
+          key={`${alt.video_id}-${i}`}
+          className="flex items-start gap-2 px-2 py-1.5 rounded-md bg-white/[0.03] backdrop-blur-sm border border-white/[0.06] cursor-pointer hover:bg-white/[0.06] hover:border-white/[0.10] transition-all duration-150"
+          onClick={() => onOpenVideo?.(alt.video_id, alt.video_title, alt.channel_name || '', alt.timestamp_seconds)}
+        >
+          <div className="flex-1 min-w-0">
+            <div className="text-[11px] text-chalk-accent leading-tight truncate">{alt.video_title}</div>
+            <div className="flex items-center gap-1 mt-0.5">
+              {alt.channel_name && <span className="text-[10px] text-slate-500 truncate">{alt.channel_name}</span>}
+              {alt.pedagogical_approach && (
+                <>
+                  {alt.channel_name && <span className="text-[10px] text-slate-600">&middot;</span>}
+                  <span className="text-[9px] px-1 py-0.5 rounded bg-white/[0.04] text-slate-400 italic">{approachLabels[alt.pedagogical_approach] || alt.pedagogical_approach.replace(/_/g, ' ')}</span>
+                </>
+              )}
+            </div>
+            {alt.context_snippet && (
+              <div className="text-[10px] text-slate-500 leading-snug line-clamp-1 mt-0.5">{alt.context_snippet}</div>
+            )}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** Expanded learning path display */
+function DrawerLearningPath({
+  result,
+  onOpenVideo,
+}: {
+  result: LearningPathResult;
+  onOpenVideo?: (videoId: string, title: string, channelName: string, seekTo?: number) => void;
+}) {
+  if (result.steps.length === 0) {
+    return <span className="text-[11px] text-slate-500">{result.message || `No path from "${result.from_concept}" to "${result.to_concept}"`}</span>;
+  }
+
+  return (
+    <div className="space-y-0.5">
+      {/* Path summary header */}
+      <div className="px-2 py-0.5 text-[10px] text-slate-400">
+        {result.steps.length} step{result.steps.length !== 1 ? 's' : ''}: <span className="text-slate-300">{result.from_concept}</span> &rarr; <span className="text-slate-300">{result.to_concept}</span>
+      </div>
+      {result.steps.map((step, i) => {
+        const hasVideo = step.best_video_id && step.best_video_title;
+        return (
+          <div key={`${step.concept_id}-${i}`}>
+            {i > 0 && (
+              <div className="flex items-center pl-3 py-0.5">
+                <span className="text-[10px] text-slate-600">&darr;</span>
+              </div>
+            )}
+            <div
+              className={`flex items-start gap-2 px-2 py-1.5 rounded-md backdrop-blur-sm ${hasVideo ? 'cursor-pointer hover:bg-white/[0.06]' : ''} transition-all duration-150`}
+              onClick={() => hasVideo && onOpenVideo?.(step.best_video_id!, step.best_video_title!, '', undefined)}
+            >
+              <span className="text-[8px] font-mono text-chalk-accent/60 bg-chalk-accent/10 w-4 h-4 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5">
+                {step.step + 1}
+              </span>
+              <div className="flex-1 min-w-0">
+                <span className={`text-[11px] ${hasVideo ? 'text-chalk-accent' : 'text-slate-300'} leading-tight`}>
+                  {step.display_name}
+                </span>
+                {hasVideo && (
+                  <div className="text-[10px] text-slate-500 truncate mt-0.5">{step.best_video_title}</div>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/** Build a compact preview string for a set of tool calls */
+function buildCollapsedPreview(calls: ToolCallData[]): React.ReactNode[] {
+  const previews: React.ReactNode[] = [];
+  const cats = new Map<string, ToolCallData[]>();
+  for (const tc of calls) {
+    const cat = tc.result.type;
+    if (!cats.has(cat)) cats.set(cat, []);
+    cats.get(cat)!.push(tc);
+  }
+
+  for (const [cat, items] of cats) {
+    switch (cat) {
+      case 'reference_video': {
+        const vids = items.map(tc => tc.result as ReferenceVideoResult);
+        // Show first thumbnail + count
+        previews.push(
+          <div key="vid" className="flex items-center gap-1.5">
+            <div className="flex -space-x-2">
+              {vids.slice(0, 3).map((v, i) => (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  key={i}
+                  src={v.thumbnail_url}
+                  alt=""
+                  className="w-6 h-4 rounded-sm object-cover border border-black/40"
+                />
+              ))}
+            </div>
+            <span className="text-[10px] text-slate-400">
+              {vids.length} video{vids.length !== 1 ? 's' : ''}
+            </span>
+          </div>
+        );
+        break;
+      }
+      case 'quiz': {
+        const q = items[0].result as QuizResult;
+        const n = q.questions.length;
+        const diffs = { easy: 0, medium: 0, hard: 0 } as Record<string, number>;
+        for (const qq of q.questions) diffs[qq.difficulty] = (diffs[qq.difficulty] || 0) + 1;
+        const parts = Object.entries(diffs).filter(([, c]) => c > 0);
+        previews.push(
+          <div key="quiz" className="flex items-center gap-1.5">
+            <span className="text-[10px] text-slate-400">{n}q</span>
+            {parts.map(([d, c]) => (
+              <span key={d} className={`text-[9px] px-1 py-0.5 rounded ${
+                d === 'easy' ? 'bg-green-500/10 text-green-400/80' :
+                d === 'hard' ? 'bg-red-500/10 text-red-400/80' :
+                'bg-yellow-500/10 text-yellow-400/80'
+              }`}>{c}</span>
+            ))}
+          </div>
+        );
+        break;
+      }
+      case 'alternative_explanations': {
+        const alt = items[0].result as AlternativeExplanationsResult;
+        const approaches = alt.alternatives
+          .map(a => a.pedagogical_approach ? (approachLabels[a.pedagogical_approach] || a.pedagogical_approach) : null)
+          .filter(Boolean);
+        previews.push(
+          <div key="alt" className="flex items-center gap-1">
+            <span className="text-[10px] text-slate-400">{alt.alternatives.length} alt{alt.alternatives.length !== 1 ? 's' : ''}</span>
+            {approaches.slice(0, 3).map((a, i) => (
+              <span key={i} className="text-[9px] px-1 py-0.5 rounded bg-white/[0.04] text-slate-500">{a}</span>
+            ))}
+          </div>
+        );
+        break;
+      }
+      case 'learning_path': {
+        const lp = items[0].result as LearningPathResult;
+        if (lp.steps.length > 0) {
+          const first = lp.steps[0].display_name;
+          const last = lp.steps[lp.steps.length - 1].display_name;
+          previews.push(
+            <div key="path" className="flex items-center gap-1">
+              <span className="text-[10px] text-chalk-accent/70 truncate max-w-[80px]">{first}</span>
+              <span className="text-[10px] text-slate-600">&rarr;</span>
+              <span className="text-[10px] text-chalk-accent/70 truncate max-w-[80px]">{last}</span>
+              <span className="text-[9px] text-slate-500">({lp.steps.length})</span>
+            </div>
+          );
+        } else {
+          previews.push(
+            <span key="path" className="text-[10px] text-slate-500">No path</span>
+          );
+        }
+        break;
+      }
+      case 'prerequisite_chain': {
+        const pc = items[0].result as PrerequisiteChainResult;
+        previews.push(
+          <span key="prereq" className="text-[10px] text-slate-400">
+            {pc.chain.length} prereq{pc.chain.length !== 1 ? 's' : ''}
+          </span>
+        );
+        break;
+      }
+      case 'cite_moment': {
+        const cites = items.map(tc => tc.result as CiteMomentResult);
+        previews.push(
+          <div key="cite" className="flex items-center gap-1">
+            {cites.slice(0, 3).map((c, i) => (
+              <span key={i} className="text-[9px] font-mono text-chalk-accent/60">[{c.timestamp}]</span>
+            ))}
+            {cites.length > 3 && <span className="text-[9px] text-slate-500">+{cites.length - 3}</span>}
+          </div>
+        );
+        break;
+      }
+    }
+  }
+  return previews;
 }
 
 /** Collapsible exchange group */
@@ -197,6 +546,7 @@ function ExchangeGroup({
   onSeek,
   onOpenVideo,
   defaultOpen,
+  currentVideoId,
 }: {
   group: DrawerExchangeGroup;
   index: number;
@@ -204,12 +554,14 @@ function ExchangeGroup({
   onSeek: (seconds: number) => void;
   onOpenVideo?: (videoId: string, title: string, channelName: string, seekTo?: number) => void;
   defaultOpen: boolean;
+  currentVideoId?: string;
 }) {
   const [isOpen, setIsOpen] = useState(defaultOpen);
   const categories = useMemo(() => groupByCategory(group.toolCalls), [group.toolCalls]);
+  const collapsedPreviews = useMemo(() => buildCollapsedPreview(group.toolCalls), [group.toolCalls]);
 
-  const truncatedQuestion = group.userText.length > 50
-    ? group.userText.slice(0, 50) + '...'
+  const truncatedQuestion = group.userText.length > 45
+    ? group.userText.slice(0, 45) + '...'
     : group.userText;
 
   return (
@@ -217,29 +569,37 @@ function ExchangeGroup({
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{
-        duration: 0.2,
-        delay: isStreaming ? index * 0.05 : Math.min(index * 0.03, 0.15),
+        duration: 0.25,
+        delay: isStreaming ? 0.1 + index * 0.05 : 0.1 + Math.min(index * 0.04, 0.2),
         ease: [0.23, 1, 0.32, 1],
       }}
     >
       {/* Exchange header — clickable to collapse */}
       <button
         onClick={() => setIsOpen(v => !v)}
-        className="w-full flex items-center gap-1.5 px-1 py-1.5 text-left hover:bg-white/[0.02] rounded transition-colors"
+        className="w-full flex flex-col gap-1 px-2 py-2 text-left hover:bg-white/[0.03] rounded-lg transition-colors"
       >
-        {isOpen
-          ? <CaretDown size={10} className="text-slate-500 flex-shrink-0" />
-          : <CaretRight size={10} className="text-slate-500 flex-shrink-0" />
-        }
-        <span className="text-[11px] text-slate-400 truncate flex-1">{truncatedQuestion}</span>
-        <span className="text-[10px] text-slate-600 font-mono flex-shrink-0">{group.toolCalls.length}</span>
+        <div className="flex items-center gap-1.5 w-full">
+          {isOpen
+            ? <CaretDown size={10} className="text-slate-500 flex-shrink-0" />
+            : <CaretRight size={10} className="text-slate-500 flex-shrink-0" />
+          }
+          <span className="text-[11px] text-slate-300 truncate flex-1">{truncatedQuestion}</span>
+        </div>
+        {/* Collapsed preview — type-specific compact summaries */}
+        {!isOpen && collapsedPreviews.length > 0 && (
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 pl-4">
+            {collapsedPreviews}
+          </div>
+        )}
       </button>
 
       {/* Collapsible body */}
       {isOpen && (
         <div className="pl-3 space-y-2 pb-2">
-          {Array.from(categories.entries()).map(([cat, calls]) => (
+          {Array.from(categories.entries()).map(([cat, calls], catIndex) => (
             <div key={cat}>
+              {catIndex > 0 && <div className="h-px bg-white/[0.06] my-2" />}
               {/* Category label */}
               {categories.size > 1 && (
                 <div className="text-[10px] uppercase tracking-wider font-mono text-slate-600 mb-1 px-1">
@@ -255,6 +615,8 @@ function ExchangeGroup({
                       key={`${group.exchangeId}-vid-${j}`}
                       result={tc.result as ReferenceVideoResult}
                       onOpenVideo={onOpenVideo}
+                      currentVideoId={currentVideoId}
+                      onSeek={onSeek}
                     />
                   ))}
                 </div>
@@ -272,8 +634,44 @@ function ExchangeGroup({
                 </div>
               )}
 
-              {/* Generic fallback for other types */}
-              {cat !== 'reference_video' && cat !== 'cite_moment' && (
+              {/* Prerequisite chain */}
+              {cat === 'prerequisite_chain' && calls.map((tc, j) => (
+                <DrawerPrerequisiteList
+                  key={`${group.exchangeId}-prereq-${j}`}
+                  result={tc.result as PrerequisiteChainResult}
+                  onOpenVideo={onOpenVideo}
+                />
+              ))}
+
+              {/* Quiz questions */}
+              {cat === 'quiz' && calls.map((tc, j) => (
+                <DrawerQuizSummary
+                  key={`${group.exchangeId}-quiz-${j}`}
+                  result={tc.result as QuizResult}
+                  onSeek={onSeek}
+                />
+              ))}
+
+              {/* Alternative explanations */}
+              {cat === 'alternative_explanations' && calls.map((tc, j) => (
+                <DrawerAlternativesList
+                  key={`${group.exchangeId}-alt-${j}`}
+                  result={tc.result as AlternativeExplanationsResult}
+                  onOpenVideo={onOpenVideo}
+                />
+              ))}
+
+              {/* Learning path */}
+              {cat === 'learning_path' && calls.map((tc, j) => (
+                <DrawerLearningPath
+                  key={`${group.exchangeId}-path-${j}`}
+                  result={tc.result as LearningPathResult}
+                  onOpenVideo={onOpenVideo}
+                />
+              ))}
+
+              {/* Generic fallback for remaining types */}
+              {cat !== 'reference_video' && cat !== 'cite_moment' && cat !== 'prerequisite_chain' && cat !== 'quiz' && cat !== 'alternative_explanations' && cat !== 'learning_path' && (
                 <div className="space-y-1">
                   {calls.map((tc, j) => (
                     <div
@@ -301,14 +699,25 @@ export function KnowledgeDrawer({
   onSeek,
   onOpenVideo,
   onClose,
+  currentVideoId,
 }: KnowledgeDrawerProps) {
   const totalCount = exchangeGroups.reduce((sum, g) => sum + g.toolCalls.length, 0) + streamingCalls.length;
   const isEmpty = totalCount === 0 && !isStreaming;
 
+  // Staggered entrance after panel width transition completes
+  const [entered, setEntered] = useState(false);
+  useEffect(() => {
+    const timer = setTimeout(() => setEntered(true), 180);
+    return () => clearTimeout(timer);
+  }, []);
+
   return (
     <div className="w-full h-full flex flex-col pointer-events-auto">
       {/* Header — matches InVideoPanel structure */}
-      <div className="flex-none flex items-center gap-2 px-3 pt-3 pb-2">
+      <div
+        className="flex-none flex items-center gap-2 px-3 pt-3 pb-2 transition-all duration-200 ease-out"
+        style={{ opacity: entered ? 1 : 0, transform: entered ? 'translateY(0)' : 'translateY(4px)' }}
+      >
         <span className="text-[11px] uppercase tracking-wider font-mono text-slate-500">Artifacts</span>
         {totalCount > 0 && (
           <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-white/[0.06] text-slate-400 font-mono">
@@ -328,7 +737,10 @@ export function KnowledgeDrawer({
       </div>
 
       {/* Scrollable body */}
-      <div className="flex-1 min-h-0 overflow-y-auto px-2 pb-3 [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
+      <div
+        className="flex-1 min-h-0 overflow-y-auto px-2 pb-3 [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none] transition-opacity duration-200 ease-out"
+        style={{ opacity: entered ? 1 : 0, transitionDelay: '60ms' }}
+      >
         {isStreaming && totalCount === 0 && <LoadingSkeleton />}
 
         {isEmpty && isExtracting && (
@@ -364,6 +776,7 @@ export function KnowledgeDrawer({
             onSeek={onSeek}
             onOpenVideo={onOpenVideo}
             defaultOpen={i === Math.min(exchangeGroups.length, 5) - 1 && streamingCalls.length === 0}
+            currentVideoId={currentVideoId}
           />
         ))}
 
@@ -380,6 +793,7 @@ export function KnowledgeDrawer({
             onSeek={onSeek}
             onOpenVideo={onOpenVideo}
             defaultOpen={true}
+            currentVideoId={currentVideoId}
           />
         )}
       </div>

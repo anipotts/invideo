@@ -15,6 +15,8 @@ export interface UseReadAloudReturn {
   isReadAloudLoading: boolean;
   playMessage: (id: string, text: string) => void;
   stopReadAloud: () => void;
+  readAloudProgress: number;
+  readAloudText: string | null;
 }
 
 const STORAGE_KEY = storageKey('auto-read-aloud');
@@ -23,10 +25,13 @@ export function useReadAloud({ voiceId, voiceSpeaking }: UseReadAloudOptions): U
   const [autoReadAloud, setAutoReadAloudState] = useState(false);
   const [playingMessageId, setPlayingMessageId] = useState<string | null>(null);
   const [isReadAloudLoading, setIsReadAloudLoading] = useState(false);
+  const [readAloudProgress, setReadAloudProgress] = useState(0);
+  const [readAloudText, setReadAloudText] = useState<string | null>(null);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const playingIdRef = useRef<string | null>(null);
+  const rafRef = useRef<number | null>(null);
 
   // Load preference from localStorage
   useEffect(() => {
@@ -44,6 +49,10 @@ export function useReadAloud({ voiceId, voiceSpeaking }: UseReadAloudOptions): U
   const stopReadAloud = useCallback(() => {
     abortRef.current?.abort('stopped');
     abortRef.current = null;
+    if (rafRef.current !== null) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
     if (audioRef.current) {
       audioRef.current.pause();
       audioRef.current.onended = null;
@@ -55,12 +64,15 @@ export function useReadAloud({ voiceId, voiceSpeaking }: UseReadAloudOptions): U
     setPlayingMessageId(null);
     playingIdRef.current = null;
     setIsReadAloudLoading(false);
+    setReadAloudProgress(0);
+    setReadAloudText(null);
   }, []);
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
       abortRef.current?.abort('cleanup');
+      if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
       if (audioRef.current) {
         audioRef.current.pause();
         const src = audioRef.current.src;
@@ -114,17 +126,34 @@ export function useReadAloud({ voiceId, voiceSpeaking }: UseReadAloudOptions): U
         const audio = new Audio(url);
         audioRef.current = audio;
         setIsReadAloudLoading(false);
+        setReadAloudText(text);
+
+        // RAF-based progress tracking for karaoke effect
+        const updateProgress = () => {
+          if (audioRef.current) {
+            const { currentTime: ct, duration: dur } = audioRef.current;
+            if (dur > 0) setReadAloudProgress(ct / dur);
+            rafRef.current = requestAnimationFrame(updateProgress);
+          }
+        };
+        rafRef.current = requestAnimationFrame(updateProgress);
 
         audio.onended = () => {
+          if (rafRef.current !== null) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
           setPlayingMessageId(null);
           playingIdRef.current = null;
+          setReadAloudProgress(0);
+          setReadAloudText(null);
           URL.revokeObjectURL(url);
           audioRef.current = null;
         };
 
         audio.onerror = () => {
+          if (rafRef.current !== null) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
           setPlayingMessageId(null);
           playingIdRef.current = null;
+          setReadAloudProgress(0);
+          setReadAloudText(null);
           URL.revokeObjectURL(url);
           audioRef.current = null;
         };
@@ -145,5 +174,7 @@ export function useReadAloud({ voiceId, voiceSpeaking }: UseReadAloudOptions): U
     isReadAloudLoading,
     playMessage,
     stopReadAloud,
+    readAloudProgress,
+    readAloudText,
   };
 }

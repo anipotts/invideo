@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { formatTimestamp } from '@/lib/video-utils';
 import { ArrowSquareOut } from '@phosphor-icons/react';
 import { ChalkIcon } from './ChalkIcon';
@@ -154,7 +154,7 @@ function getRelationshipLabel(reason: string): string {
   return 'Related';
 }
 
-const approachLabels: Record<string, string> = {
+export const approachLabels: Record<string, string> = {
   visual_geometric: 'Visual',
   algebraic_symbolic: 'Algebraic',
   intuitive_analogy: 'Analogy',
@@ -167,7 +167,10 @@ const approachLabels: Record<string, string> = {
 };
 
 /**
- * Inline citation pill for a specific video moment.
+ * Inline citation link for a specific video moment.
+ * Renders as a TimestampLink-style inline [M:SS] with a subtle label suffix.
+ * The aria-label pattern triggers the existing TimestampTooltip in MessagePanel
+ * (storyboard thumbnail + transcript context on hover).
  */
 export function CiteMomentCard({
   result,
@@ -179,11 +182,15 @@ export function CiteMomentCard({
   return (
     <button
       onClick={() => onSeek(result.timestamp_seconds)}
-      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-white/[0.06] hover:bg-white/[0.10] border border-white/[0.08] hover:border-white/[0.12] text-slate-300 transition-all duration-150 cursor-pointer"
-      title={result.context}
+      className="inline-flex items-center gap-1 mx-0.5 px-1.5 py-0.5 rounded-md font-mono text-xs align-middle bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 hover:text-blue-300 transition-all duration-300 cursor-pointer"
+      aria-label={`Seek to ${result.timestamp} in video`}
+      data-cite-label={result.label}
+      data-cite-context={result.context}
     >
-      <span className="font-mono text-xs">[{result.timestamp}]</span>
-      <span className="text-xs text-slate-300">{result.label}</span>
+      {result.timestamp}
+      {result.label && (
+        <span className="font-sans text-[11px] text-slate-400 max-w-[180px] truncate">{result.label}</span>
+      )}
     </button>
   );
 }
@@ -194,11 +201,20 @@ export function CiteMomentCard({
 export function ReferenceVideoCard({
   result,
   onOpenVideo,
+  currentVideoId,
+  onSeek,
 }: {
   result: ReferenceVideoResult;
   onOpenVideo?: (videoId: string, title: string, channelName: string, seekTo?: number) => void;
+  currentVideoId?: string;
+  onSeek?: (seconds: number) => void;
 }) {
   const handleClick = () => {
+    // Same-video references seek the main player instead of opening side panel
+    if (currentVideoId && result.video_id === currentVideoId && result.timestamp_seconds != null && onSeek) {
+      onSeek(result.timestamp_seconds);
+      return;
+    }
     if (onOpenVideo) {
       onOpenVideo(result.video_id, result.video_title, result.channel_name, result.timestamp_seconds ?? undefined);
     }
@@ -219,7 +235,7 @@ export function ReferenceVideoCard({
   return (
     <div
       onClick={handleClick}
-      className="flex gap-3 p-3 rounded-lg bg-white/[0.03] hover:bg-white/[0.05] border border-white/[0.06] hover:border-white/[0.10] cursor-pointer transition-all duration-150 group my-2"
+      className="flex gap-3 p-3 rounded-lg bg-white/[0.03] backdrop-blur-sm hover:bg-white/[0.05] border border-white/[0.06] hover:border-white/[0.10] cursor-pointer transition-all duration-150 group my-2"
     >
       <div className="flex-shrink-0 w-28 h-16 rounded-md overflow-hidden bg-chalk-border relative">
         {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -285,41 +301,63 @@ export function PrerequisiteChainCard({
     return null;
   }
 
-  // Group by depth
+  // Group by depth — filter out items without video links, max 4 per level
   const byDepth = new Map<number, typeof result.chain>();
   for (const item of result.chain) {
+    if (!item.best_video_id) continue;
     if (!byDepth.has(item.depth)) byDepth.set(item.depth, []);
-    byDepth.get(item.depth)!.push(item);
+    const group = byDepth.get(item.depth)!;
+    if (group.length < 4) group.push(item);
   }
+
+  if (byDepth.size === 0) return null;
 
   const sortedDepths = [...byDepth.entries()].sort((a, b) => a[0] - b[0]);
 
+  const depthLabels = ['Start here', 'Then', 'Finally'];
+
   return (
-    <div className="p-3 rounded-lg bg-white/[0.03] border border-white/[0.06] my-2">
+    <div className="p-3 rounded-lg bg-white/[0.03] backdrop-blur-sm border border-white/[0.06] my-2">
       <div className="text-[11px] text-slate-500 uppercase tracking-wider font-mono mb-2">
         Prerequisites
       </div>
-      <div className="space-y-1.5">
-        {sortedDepths.map(([depth, items]) => (
-          <div key={depth} className="flex flex-wrap gap-1.5" style={{ marginLeft: `${(depth - 1) * 16}px` }}>
-            {items.map((item) => (
-              <button
-                key={item.concept_id}
-                onClick={() => {
-                  if (item.best_video_id && onOpenVideo) {
-                    onOpenVideo(item.best_video_id, item.best_video_title || item.display_name, '', undefined);
-                  }
-                }}
-                className={`px-2 py-0.5 rounded text-xs transition-all duration-150 ${
-                  item.best_video_id
-                    ? 'bg-white/[0.04] border border-white/[0.06] text-chalk-accent hover:bg-white/[0.08] cursor-pointer'
-                    : 'bg-white/[0.04] border border-white/[0.06] text-slate-300'
-                }`}
-                title={item.best_video_title ? `Watch: ${item.best_video_title}` : item.display_name}
-              >
-                {item.display_name}
-              </button>
-            ))}
+      <div className="space-y-0">
+        {sortedDepths.map(([depth, items], depthIdx) => (
+          <div key={depth} className="flex items-start gap-2">
+            {/* Tree connector */}
+            <div className="flex flex-col items-center flex-shrink-0 w-5 pt-1">
+              {depthIdx < sortedDepths.length - 1 ? (
+                <svg width="20" height="20" viewBox="0 0 20 20" className="text-chalk-accent/50">
+                  <path d="M10 0 V12 H18" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                </svg>
+              ) : (
+                <svg width="20" height="20" viewBox="0 0 20 20" className="text-chalk-accent/50">
+                  <path d="M10 0 V12 H18" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                </svg>
+              )}
+            </div>
+            {/* Label + chips */}
+            <div className="flex-1 min-w-0 pb-2">
+              <div className="text-[10px] text-chalk-accent/70 font-mono mb-1">
+                {depthLabels[depthIdx] || `Step ${depthIdx + 1}`}
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {items.map((item) => (
+                  <button
+                    key={item.concept_id}
+                    onClick={() => {
+                      if (item.best_video_id && onOpenVideo) {
+                        onOpenVideo(item.best_video_id, item.best_video_title || item.display_name, '', undefined);
+                      }
+                    }}
+                    className="px-2 py-0.5 rounded text-xs transition-all duration-150 bg-white/[0.04] border border-white/[0.06] text-chalk-accent hover:bg-white/[0.08] cursor-pointer"
+                    title={item.best_video_title ? `Watch: ${item.best_video_title}` : item.display_name}
+                  >
+                    {item.display_name}
+                  </button>
+                ))}
+              </div>
+            </div>
           </div>
         ))}
       </div>
@@ -328,7 +366,8 @@ export function PrerequisiteChainCard({
 }
 
 /**
- * Interactive quiz card with reveal-on-click answers.
+ * Interactive quiz card with mode selector: "One by one", "All at once", or "Something else".
+ * Sequential mode appends questions into the chat like a conversation.
  */
 export function QuizCard({
   result,
@@ -341,11 +380,122 @@ export function QuizCard({
     return null;
   }
 
+  const [mode, setMode] = useState<'select' | 'sequential' | 'all' | 'dismissed'>(
+    result.questions.length === 1 ? 'all' : 'select'
+  );
+  const [answeredCount, setAnsweredCount] = useState(0);
+  const [scores, setScores] = useState<boolean[]>([]);
+
+  const handleAnswered = useCallback((correct: boolean) => {
+    setScores(prev => [...prev, correct]);
+    setAnsweredCount(prev => prev + 1);
+  }, []);
+
+  const handleSomethingElse = useCallback(() => {
+    setMode('dismissed');
+    setTimeout(() => {
+      const input = document.querySelector('[role="textbox"][contenteditable="true"]') as HTMLElement;
+      if (input) input.focus();
+    }, 50);
+  }, []);
+
+  const total = result.questions.length;
+
+  // Mode selector
+  if (mode === 'select') {
+    return (
+      <div className="my-1">
+        <div className="text-[15px] text-slate-300 leading-relaxed mb-2">{total} questions ready?</div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setMode('sequential')}
+            className="px-2.5 py-1 rounded-md text-xs border border-white/[0.08] bg-white/[0.04] backdrop-blur-sm hover:bg-white/[0.08] hover:border-white/[0.15] text-slate-300 hover:text-white transition-colors"
+          >
+            <span className="font-mono text-[10px] text-slate-500 mr-1">A.</span>
+            One by one
+          </button>
+          <button
+            onClick={() => setMode('all')}
+            className="px-2.5 py-1 rounded-md text-xs border border-white/[0.08] bg-white/[0.04] backdrop-blur-sm hover:bg-white/[0.08] hover:border-white/[0.15] text-slate-300 hover:text-white transition-colors"
+          >
+            <span className="font-mono text-[10px] text-slate-500 mr-1">B.</span>
+            All at once
+          </button>
+          <button
+            onClick={handleSomethingElse}
+            className="px-2.5 py-1 rounded-md text-xs border border-white/[0.08] bg-white/[0.04] backdrop-blur-sm hover:bg-white/[0.08] hover:border-white/[0.15] text-slate-300 hover:text-white transition-colors"
+          >
+            <span className="font-mono text-[10px] text-slate-500 mr-1">C.</span>
+            Something else
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // Dismissed — user chose "Something else"
+  if (mode === 'dismissed') {
+    return (
+      <div className="my-1">
+        <div className="text-[15px] text-slate-300 leading-relaxed mb-2">{total} questions ready?</div>
+        <div className="flex items-center gap-2">
+          <button disabled className="px-2.5 py-1 rounded-md text-xs border border-white/[0.04] bg-white/[0.02] text-slate-600">
+            <span className="font-mono text-[10px] text-slate-600 mr-1">A.</span>One by one
+          </button>
+          <button disabled className="px-2.5 py-1 rounded-md text-xs border border-white/[0.04] bg-white/[0.02] text-slate-600">
+            <span className="font-mono text-[10px] text-slate-600 mr-1">B.</span>All at once
+          </button>
+          <button disabled className="px-2.5 py-1 rounded-md text-xs border border-chalk-accent/20 bg-chalk-accent/5 text-slate-500">
+            <span className="font-mono text-[10px] text-slate-500 mr-1">C.</span>Something else
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // All at once
+  if (mode === 'all') {
+    const allDone = answeredCount >= total;
+    const correct = scores.filter(Boolean).length;
+    return (
+      <div className="space-y-2 my-2">
+        {result.questions.map((q, i) => (
+          <QuizQuestion key={i} question={q} onSeek={onSeek} onAnswered={handleAnswered} questionNumber={i + 1} total={total} />
+        ))}
+        {allDone && <QuizSummary correct={correct} total={total} />}
+      </div>
+    );
+  }
+
+  // Sequential mode — questions append like a conversation
+  const correct = scores.filter(Boolean).length;
+  const allDone = answeredCount >= total;
+  const visibleCount = Math.min(answeredCount + 1, total);
+
   return (
     <div className="space-y-2 my-2">
-      {result.questions.map((q, i) => (
-        <QuizQuestion key={i} question={q} onSeek={onSeek} />
+      {result.questions.slice(0, visibleCount).map((q, i) => (
+        <QuizQuestion
+          key={i}
+          question={q}
+          onSeek={onSeek}
+          onAnswered={i === answeredCount ? handleAnswered : undefined}
+          questionNumber={i + 1}
+          total={total}
+        />
       ))}
+      {allDone && <QuizSummary correct={correct} total={total} />}
+    </div>
+  );
+}
+
+function QuizSummary({ correct, total }: { correct: number; total: number }) {
+  const label = correct === total ? 'Perfect score!' : correct >= total * 0.7 ? 'Nice work!' : 'Keep studying!';
+  return (
+    <div className="flex items-center gap-3 px-3 py-2 rounded-lg bg-white/[0.03] border border-white/[0.06]">
+      <div className="text-[11px] text-slate-500 uppercase tracking-wider font-mono">Quiz Complete</div>
+      <div className="text-sm text-slate-200 font-medium">{correct}/{total}</div>
+      <div className="text-xs text-slate-400">{label}</div>
     </div>
   );
 }
@@ -353,35 +503,80 @@ export function QuizCard({
 function QuizQuestion({
   question: q,
   onSeek,
+  onAnswered,
+  questionNumber,
+  total,
 }: {
   question: QuizResult['questions'][0];
   onSeek: (seconds: number) => void;
+  onAnswered?: (correct: boolean) => void;
+  questionNumber?: number;
+  total?: number;
 }) {
   const [selected, setSelected] = useState<string | null>(null);
+  const [feedbackVisible, setFeedbackVisible] = useState(false);
+  const cardRef = useCallback((node: HTMLDivElement | null) => {
+    if (!node) return;
+    // On mount, if this is the active question (not yet answered), scroll into view
+    if (!selected && onAnswered) {
+      setTimeout(() => node.scrollIntoView({ behavior: 'smooth', block: 'center' }), 100);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const isAnswered = selected !== null;
   const isCorrect = selected === q.correct_answer;
 
-  // Build shuffled options (correct + distractors)
+  // Build shuffled options with minimum 3 (correct + distractors)
   const options = useState(() => {
     const all = [q.correct_answer, ...(q.distractors || [])];
-    for (let i = all.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [all[i], all[j]] = [all[j], all[i]];
+    while (all.length < 3) {
+      all.push(all.length === 1 ? 'None of the above' : 'All of the above');
     }
-    return all;
+    const unique = [...new Set(all)];
+    for (let i = unique.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [unique[i], unique[j]] = [unique[j], unique[i]];
+    }
+    return unique;
   })[0];
 
+  // Keyboard support: A/B/C/D keys select corresponding option
+  useEffect(() => {
+    if (isAnswered || !onAnswered) return;
+    const handler = (e: KeyboardEvent) => {
+      const tag = document.activeElement?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || (document.activeElement as HTMLElement)?.isContentEditable) return;
+
+      const idx = e.key.toUpperCase().charCodeAt(0) - 65;
+      if (idx >= 0 && idx < options.length) {
+        setSelected(options[idx]);
+        onAnswered(options[idx] === q.correct_answer);
+        setTimeout(() => setFeedbackVisible(true), 50);
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [isAnswered, options, q.correct_answer, onAnswered]);
+
+  const handleSelect = (opt: string) => {
+    if (isAnswered || !onAnswered) return;
+    setSelected(opt);
+    onAnswered(opt === q.correct_answer);
+    setTimeout(() => setFeedbackVisible(true), 50);
+  };
+
   return (
-    <div className="p-3 rounded-lg bg-white/[0.03] border border-white/[0.06]">
+    <div ref={cardRef} className="p-3 rounded-lg bg-white/[0.03] backdrop-blur-sm border border-white/[0.06] transition-all duration-300">
       <div className="flex items-center gap-2 mb-2">
         <span className="text-[11px] text-slate-500 uppercase tracking-wider font-mono">Quiz</span>
+        {questionNumber && total && <span className="text-[11px] text-slate-400 font-mono">{questionNumber}/{total}</span>}
         <span className="text-[11px] text-slate-500">({q.difficulty})</span>
         {q.timestamp_seconds !== null && (
           <button
             onClick={() => onSeek(q.timestamp_seconds!)}
-            className="text-[11px] text-chalk-accent hover:underline font-mono ml-auto"
+            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md font-mono text-[11px] align-middle bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 hover:text-blue-300 transition-all duration-300 cursor-pointer ml-auto"
           >
-            [{formatTimestamp(q.timestamp_seconds!)}]
+            {formatTimestamp(q.timestamp_seconds!)}
           </button>
         )}
       </div>
@@ -403,9 +598,9 @@ function QuizQuestion({
           return (
             <button
               key={i}
-              onClick={() => !isAnswered && setSelected(opt)}
+              onClick={() => handleSelect(opt)}
               disabled={isAnswered}
-              className={`w-full text-left px-3 py-2 rounded-md border text-xs transition-all duration-150 ${optClass} ${!isAnswered ? 'cursor-pointer' : ''}`}
+              className={`w-full text-left px-3 py-2 rounded-md border text-xs transition-all duration-200 ${optClass} ${!isAnswered ? 'cursor-pointer' : ''}`}
             >
               <span className="font-mono text-[10px] text-slate-500 mr-2">{String.fromCharCode(65 + i)}.</span>
               {opt}
@@ -413,14 +608,21 @@ function QuizQuestion({
           );
         })}
       </div>
-      {isAnswered && (
-        <div className="mt-2 text-xs text-slate-400">
-          <span className={isCorrect ? 'text-chalk-accent' : 'text-slate-400'}>
-            {isCorrect ? 'Correct.' : `Incorrect \u2014 answer: ${q.correct_answer}`}
+      <div
+        className="overflow-hidden transition-all duration-300 ease-out"
+        style={{
+          maxHeight: feedbackVisible ? '120px' : '0px',
+          opacity: feedbackVisible ? 1 : 0,
+          marginTop: feedbackVisible ? '8px' : '0px',
+        }}
+      >
+        <div className="text-xs">
+          <span className={isCorrect ? 'text-emerald-400 font-medium' : 'text-red-400/80'}>
+            {isCorrect ? 'Correct.' : `Incorrect. The answer is: ${q.correct_answer}`}
           </span>
-          {q.explanation && <div className="mt-1">{q.explanation}</div>}
+          {q.explanation && <div className="text-slate-500 mt-1 leading-relaxed">{q.explanation}</div>}
         </div>
-      )}
+      </div>
     </div>
   );
 }
@@ -438,7 +640,7 @@ export function ChapterContextCard({
   if (!result.chapter && result.moments.length === 0) return null;
 
   return (
-    <div className="p-3 rounded-lg bg-white/[0.03] border border-white/[0.06] my-2">
+    <div className="p-3 rounded-lg bg-white/[0.03] backdrop-blur-sm border border-white/[0.06] my-2">
       <div className="text-[11px] text-slate-500 uppercase tracking-wider font-mono mb-2">
         Chapter
       </div>
@@ -476,7 +678,7 @@ export function ChapterContextCard({
 }
 
 /**
- * Alternative explanations — shows different teaching approaches for a concept.
+ * Alternative explanations — rich cards with thumbnails, channel, approach, context.
  */
 export function AlternativeExplanationsCard({
   result,
@@ -487,30 +689,60 @@ export function AlternativeExplanationsCard({
 }) {
   if (result.message || result.alternatives.length === 0) return null;
 
+  // Deduplicate by video_id
+  const seen = new Set<string>();
+  const unique = result.alternatives.filter(alt => {
+    if (seen.has(alt.video_id)) return false;
+    seen.add(alt.video_id);
+    return true;
+  });
+
+  if (unique.length === 0) return null;
+
   return (
-    <div className="p-3 rounded-lg bg-white/[0.03] border border-white/[0.06] my-2">
-      <div className="text-[11px] text-slate-500 uppercase tracking-wider font-mono mb-2">
-        Alternatives
+    <div className="my-2 space-y-2">
+      <div className="text-[11px] text-slate-500 uppercase tracking-wider font-mono">
+        {unique.length === 1 ? 'Different take on' : `${unique.length} other approaches to`} <span className="text-slate-400 normal-case">{result.concept}</span>
       </div>
-      <div className="space-y-1">
-        {result.alternatives.slice(0, 4).map((alt, i) => (
-          <button
-            key={i}
-            onClick={() => onOpenVideo?.(alt.video_id, alt.video_title, alt.channel_name || '', alt.timestamp_seconds)}
-            className="flex items-center gap-2 w-full text-left hover:bg-white/[0.04] rounded-md p-1.5 transition-colors"
-          >
-            <div className="flex-1 min-w-0">
-              <div className="text-sm text-slate-200 line-clamp-1">{alt.video_title}</div>
-              <div className="text-xs text-slate-400">
-                {alt.channel_name || 'Unknown'}
-                {alt.pedagogical_approach && (
-                  <span className="text-slate-500"> &middot; {approachLabels[alt.pedagogical_approach] || alt.pedagogical_approach}</span>
-                )}
-              </div>
+      {unique.slice(0, 4).map((alt, i) => (
+        <div
+          key={i}
+          onClick={() => onOpenVideo?.(alt.video_id, alt.video_title, alt.channel_name || '', alt.timestamp_seconds)}
+          className="flex gap-3 p-2.5 rounded-lg bg-white/[0.03] backdrop-blur-sm hover:bg-white/[0.05] border border-white/[0.06] hover:border-white/[0.10] cursor-pointer transition-all duration-150 group"
+        >
+          {/* Thumbnail */}
+          <div className="flex-shrink-0 w-24 h-[54px] rounded-md overflow-hidden bg-chalk-border/50 relative">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={`https://i.ytimg.com/vi/${alt.video_id}/mqdefault.jpg`}
+              alt=""
+              className="w-full h-full object-cover"
+              loading="lazy"
+            />
+            <span className="absolute bottom-0.5 right-0.5 bg-black/80 text-white text-[9px] px-0.5 rounded font-mono leading-tight">
+              {formatTimestamp(alt.timestamp_seconds)}
+            </span>
+          </div>
+          {/* Info */}
+          <div className="flex-1 min-w-0 flex flex-col justify-center">
+            <div className="flex items-center gap-2">
+              <div className="text-[13px] text-slate-200 leading-tight line-clamp-1 flex-1 min-w-0">{alt.video_title}</div>
+              <ChalkIcon size={14} className="text-slate-600 group-hover:text-chalk-accent transition-colors flex-shrink-0" />
             </div>
-          </button>
-        ))}
-      </div>
+            <div className="flex items-center gap-1.5 mt-1">
+              {alt.channel_name && <span className="text-[11px] text-slate-500">{alt.channel_name}</span>}
+              {alt.pedagogical_approach && (
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-chalk-accent/10 text-chalk-accent/70 border border-chalk-accent/20">
+                  {approachLabels[alt.pedagogical_approach] || alt.pedagogical_approach}
+                </span>
+              )}
+            </div>
+            {alt.context_snippet && (
+              <div className="text-[11px] text-slate-500 leading-snug line-clamp-1 mt-1 italic">&ldquo;{alt.context_snippet}&rdquo;</div>
+            )}
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
@@ -525,16 +757,25 @@ export function LearningPathCard({
   result: LearningPathResult;
   onOpenVideo?: (videoId: string, title: string, channelName: string, seekTo?: number) => void;
 }) {
-  if (result.message || result.steps.length === 0) return null;
+  if (result.steps.length === 0) {
+    return (
+      <div className="p-3 rounded-lg bg-white/[0.03] backdrop-blur-sm border border-white/[0.06] my-2">
+        <div className="text-[11px] text-slate-500 uppercase tracking-wider font-mono mb-2">Learning Path</div>
+        <div className="text-xs text-slate-400">
+          {result.message || `No direct path found between "${result.from_concept}" and "${result.to_concept}".`}
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div className="p-3 rounded-lg bg-white/[0.03] border border-white/[0.06] my-2">
+    <div className="p-3 rounded-lg bg-white/[0.03] backdrop-blur-sm border border-white/[0.06] my-2">
       <div className="text-[11px] text-slate-500 uppercase tracking-wider font-mono mb-2">
         Learning Path
       </div>
       <div className="flex flex-wrap items-center gap-1">
         {result.steps.map((step, i) => (
-          <div key={step.concept_id} className="flex items-center gap-1">
+          <div key={`${step.concept_id}-${i}`} className="flex items-center gap-1">
             {i > 0 && <span className="text-slate-500 text-xs">&rsaquo;</span>}
             <button
               onClick={() => {
@@ -562,11 +803,20 @@ export function LearningPathCard({
 
 const DRAWER_TYPES = new Set([
   'reference_video', 'prerequisite_chain', 'quiz',
-  'chapter_context', 'alternative_explanations', 'learning_path', 'search_results',
+  'chapter_context', 'alternative_explanations', 'learning_path',
 ]);
 
 export function isDrawerTool(tc: ToolCallData): boolean {
-  return DRAWER_TYPES.has(tc.result.type);
+  if (!DRAWER_TYPES.has(tc.result.type)) return false;
+  // Filter out empty results
+  const r = tc.result;
+  switch (r.type) {
+    case 'learning_path': return (r as LearningPathResult).steps.length > 0;
+    case 'quiz': return (r as QuizResult).questions.length > 0;
+    case 'alternative_explanations': return (r as AlternativeExplanationsResult).alternatives.length > 0;
+    case 'prerequisite_chain': return (r as PrerequisiteChainResult).chain.length > 0;
+    default: return true;
+  }
 }
 
 /**
@@ -591,7 +841,7 @@ export function CompactToolStrip({
         {toolCalls.map((tc, i) => {
           const r = tc.result;
           const isExpanded = expandedIndex === i;
-          const baseClass = `px-2 py-1 rounded text-[11px] border transition-all duration-150 cursor-pointer ${
+          const baseClass = `px-2 py-1 rounded text-[11px] border backdrop-blur-sm transition-all duration-150 cursor-pointer ${
             isExpanded
               ? 'bg-white/[0.08] border-chalk-accent/30 text-slate-200 ring-1 ring-chalk-accent/20'
               : 'bg-white/[0.03] border-white/[0.06] text-slate-400 hover:bg-white/[0.05] hover:text-slate-300'
@@ -655,10 +905,12 @@ export function ToolResultRenderer({
   toolCall,
   onSeek,
   onOpenVideo,
+  currentVideoId,
 }: {
   toolCall: ToolCallData;
   onSeek: (seconds: number) => void;
   onOpenVideo?: (videoId: string, title: string, channelName: string, seekTo?: number) => void;
+  currentVideoId?: string;
 }) {
   const { result } = toolCall;
 
@@ -666,7 +918,7 @@ export function ToolResultRenderer({
     case 'cite_moment':
       return <CiteMomentCard result={result} onSeek={onSeek} />;
     case 'reference_video':
-      return <ReferenceVideoCard result={result} onOpenVideo={onOpenVideo} />;
+      return <ReferenceVideoCard result={result} onOpenVideo={onOpenVideo} currentVideoId={currentVideoId} onSeek={onSeek} />;
     case 'prerequisite_chain':
       return <PrerequisiteChainCard result={result} onOpenVideo={onOpenVideo} />;
     case 'quiz':
@@ -678,9 +930,7 @@ export function ToolResultRenderer({
     case 'learning_path':
       return <LearningPathCard result={result} onOpenVideo={onOpenVideo} />;
     case 'search_results':
-      if (result.results.length === 0 || result.message) {
-        return <p className="text-xs text-slate-500 italic my-1">No related content found</p>;
-      }
+      // Never render search_results in chat — they're internal data for the AI
       return null;
     default:
       return null;
@@ -775,4 +1025,37 @@ export function parseStreamToSegments(rawText: string): StreamSegment[] {
   }
 
   return segments;
+}
+
+/**
+ * Reorders segments so tool calls never appear before text.
+ * Any tool segment that precedes the first text segment is deferred to after it.
+ * Once text has started rendering, subsequent tools appear inline in stream order.
+ */
+export function reorderToolsAfterText(segments: StreamSegment[]): StreamSegment[] {
+  const shouldDefer = (seg: StreamSegment) => seg.type === 'tool';
+
+  const result: StreamSegment[] = [];
+  const deferred: StreamSegment[] = [];
+  let hasRenderedText = false;
+
+  for (const seg of segments) {
+    if (shouldDefer(seg) && !hasRenderedText) {
+      deferred.push(seg);
+    } else {
+      if (seg.type === 'text') {
+        hasRenderedText = true;
+        result.push(seg);
+        if (deferred.length > 0) {
+          result.push(...deferred);
+          deferred.length = 0;
+        }
+      } else {
+        result.push(seg);
+      }
+    }
+  }
+
+  result.push(...deferred);
+  return result;
 }

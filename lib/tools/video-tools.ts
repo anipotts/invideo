@@ -82,7 +82,7 @@ export function createVideoTools(currentVideoId: string, segments: TranscriptSeg
       transcript_line: string;
       video_id: string;
     }>({
-      description: 'Cite a specific moment in the current video with a timestamp, label, and context. Use this to create rich, clickable timestamp references.',
+      description: 'Create a highlighted timestamp card. Use sparingly (1-3 per response) for key moments only. For most timestamps, use inline [M:SS] text instead — it renders as a clickable badge automatically.',
       inputSchema: zodSchema(citeMomentSchema),
       execute: async ({ timestamp_seconds, label, context }) => {
         const segment = segments.length > 0 ? segments.reduce((closest, seg) => {
@@ -116,7 +116,7 @@ export function createVideoTools(currentVideoId: string, segments: TranscriptSeg
       relationship: string | null;
       shared_concepts: string[];
     }>({
-      description: 'Reference another video that covers a related topic. Use when the knowledge graph indicates relevant videos, or when the user asks about topics covered elsewhere.',
+      description: 'Create a video card with thumbnail, title, channel name, and relationship badge. Use whenever you mention another video from <related_videos> or when tool results include video references. The user can click to open the video in a side panel or new tab. Requires video_id, title, and channel_name from knowledge graph data.',
       inputSchema: zodSchema(referenceVideoSchema),
       execute: async ({ video_id, timestamp_seconds, video_title, channel_name, reason }) => {
         const client = getAdminClient();
@@ -377,7 +377,7 @@ export function createVideoTools(currentVideoId: string, segments: TranscriptSeg
       }>;
       message?: string;
     }>({
-      description: 'Get the prerequisite chain for a concept. Returns concepts that should be understood first, with the best video to learn each one. Use when a user is confused or asks "what should I learn first?"',
+      description: 'Get the prerequisite chain for a concept (returns max 10, shallowest first). Use when the user is confused, asks "what should I learn first?", or asks about foundational concepts. After calling this, always summarize the top prerequisites in natural language and call reference_video for the best learning resource.',
       inputSchema: zodSchema(getPrerequisitesSchema),
       execute: async ({ concept_id, max_depth }) => {
         const client = getAdminClient();
@@ -385,7 +385,7 @@ export function createVideoTools(currentVideoId: string, segments: TranscriptSeg
           return { type: 'prerequisite_chain' as const, concept_id, chain: [], message: 'Knowledge base not available' };
         }
 
-        const depth = max_depth ?? 4;
+        const depth = max_depth ?? 3;
 
         // Try the recursive CTE function first
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -452,10 +452,15 @@ export function createVideoTools(currentVideoId: string, segments: TranscriptSeg
           .in('video_id', videoIds);
         const titleMap = new Map((rawTitles as Array<{ video_id: string; title: string }> || []).map(v => [v.video_id, v.title]));
 
+        // Sort by depth (shallowest = most directly relevant), cap at 10
+        const sorted = (data as Array<{ concept_id: string; display_name: string; depth: number }>)
+          .sort((a, b) => a.depth - b.depth)
+          .slice(0, 10);
+
         return {
           type: 'prerequisite_chain' as const,
           concept_id,
-          chain: (data as Array<{ concept_id: string; display_name: string; depth: number }>).map(d => {
+          chain: sorted.map(d => {
             const vid = bestVideoMap.get(d.concept_id);
             return {
               concept_id: d.concept_id,
